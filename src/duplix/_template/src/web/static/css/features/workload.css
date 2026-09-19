@@ -1,0 +1,20 @@
+/* ---- workload bar ---- */
+.bar {
+  position: relative;
+  height: 14px;
+  background: #eef0f2;
+  border-radius: 4px;
+  width: 200px;
+  overflow: hidden;
+}
+.bar .fill { height: 100%; background: var(--primary); }
+.bar .fill.over { background: var(--warn); }
+.bar .fill.over-cap { background: var(--danger); }
+.bar .marker {
+  position: absolute;
+  top: -3px;
+  bottom: -3px;
+  width: 2px;
+  background: rgba(0,0,0,0.45);
+}
+

@@ -1,0 +1,42 @@
+/* ---- Setup sidebar: the files that are given once ----
+   Shares the .drawer shell with the Override drawer, and only differs
+   where it has to: it holds two upload slots rather than a wide editable
+   table, so it's narrower and its slots stack instead of tiling. */
+
+#setup-sidebar {
+  width: min(460px, 92vw);
+}
+
+.setup-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--line);
+}
+.setup-section:last-child {
+  padding-bottom: 0;
+  border-bottom: 0;
+}
+.setup-section h3 {
+  margin: 0;
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--subdued);
+}
+.setup-section-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.setup-section .small { margin: 0; }
+
+/* One slot per row: the sidebar is too narrow for the dashboard card's
+   auto-fit columns, which would squeeze the filename to nothing. */
+.inputs-list-stacked {
+  grid-template-columns: 1fr;
+}
+

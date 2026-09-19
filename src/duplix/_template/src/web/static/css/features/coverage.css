@@ -1,0 +1,48 @@
+/* ---- coverage bars (Plan summary: staff present vs needed) ---- */
+.coverage-bars {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.cov-row {
+  display: grid;
+  grid-template-columns: 60px 1fr 140px;
+  align-items: center;
+  gap: 12px;
+  font-size: 13px;
+}
+.cov-row .cov-label {
+  font-weight: 600;
+  color: var(--text);
+}
+.cov-row .cov-bar {
+  position: relative;
+  height: 18px;
+  background: var(--bg-elev);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  overflow: hidden;
+}
+.cov-row .cov-fill {
+  height: 100%;
+  background: var(--ok);
+  transition: width 0.25s ease;
+}
+.cov-row.cov-short .cov-fill { background: var(--warn); }
+.cov-row.cov-empty .cov-fill { background: var(--danger); }
+.cov-row .cov-target-mark {
+  position: absolute;
+  top: -2px; bottom: -2px;
+  width: 2px;
+  background: rgba(15, 20, 28, 0.55);
+}
+.cov-row .cov-caption {
+  color: var(--subdued);
+  font-size: 12px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.cov-row .cov-caption .ok { color: var(--ok); font-weight: 600; }
+.cov-row .cov-caption .warn { color: var(--warn); font-weight: 600; }
+.cov-row .cov-caption .danger { color: var(--danger); font-weight: 600; }
+

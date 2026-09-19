@@ -1,0 +1,161 @@
+/* Flight trend chart — full-width, operational-day timeline (D 05:00
+   -> D+1 05:00), shift bands, smooth area + bars, peak/avg callouts,
+   footer stats. Aesthetic refresh 2026-05-16. */
+.flight-trend { width: 100%; }
+.trend-svg {
+  width: 100%; height: auto;
+  display: block;
+  background: linear-gradient(180deg, #fafbfd 0%, #ffffff 100%);
+  border-radius: 6px;
+  border: 1px solid var(--line);
+}
+/* 2026-05-16: trend chart text restyled — subtle / lighter weight
+   per user direction, not the previous bold treatment that fought
+   the chart shapes for attention. Unified sans-serif stack. */
+.trend-axis {
+  font-size: 11px; fill: rgba(80, 80, 80, 0.9);
+  font-weight: 400;
+  font-family: -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+.trend-band-label {
+  font-size: 10px; fill: rgba(20, 20, 20, 0.7);
+  font-weight: 500;
+  font-family: -apple-system, "Segoe UI", Roboto, sans-serif;
+  pointer-events: none;
+  letter-spacing: 0.4px;
+}
+.trend-avg-label {
+  font-size: 10px; fill: #c46500; font-weight: 500;
+  font-family: -apple-system, "Segoe UI", Roboto, sans-serif;
+  font-style: italic;
+}
+.trend-peak-label {
+  font-size: 10px; fill: #2563eb; font-weight: 500;
+  font-family: -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+.trend-footer {
+  margin-top: 12px;
+  display: flex; flex-direction: column; gap: 8px;
+}
+.trend-summary {
+  display: flex; flex-wrap: wrap; gap: 24px;
+  padding: 8px 12px;
+  background: #f4f7fb;
+  border-radius: 6px;
+  font-size: 13px;
+}
+.trend-summary-cell strong {
+  color: #1a1a1a; font-size: 14px;
+  margin-right: 4px;
+}
+.trend-shift-stats {
+  display: flex; flex-wrap: wrap; gap: 10px 16px;
+  font-size: 12px;
+}
+.trend-stat-cell {
+  display: flex; align-items: center; gap: 6px;
+}
+.trend-stat-detail {
+  color: var(--subdued, #555);
+}
+.trend-stat-detail strong { color: #1a1a1a; }
+
+/* Zoom slider bar above the chart. Two stacked range inputs share
+   a common track + a colored fill that highlights the visible
+   window. Sliders are positioned absolutely on top of the track;
+   pointer-events on the thumbs only. */
+.trend-zoom-bar {
+  display: flex; align-items: center; gap: 12px;
+  margin-bottom: 12px;
+  font-size: 12px;
+  padding: 8px 12px;
+  background: #f4f7fb;
+  border-radius: 6px;
+}
+.trend-zoom-label { color: var(--subdued, #666); }
+.trend-zoom-window {
+  color: #1a1a1a; min-width: 130px;
+  font-family: -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+.trend-zoom-window strong { color: #2563eb; font-weight: 600; }
+.trend-zoom-slider {
+  position: relative;
+  flex: 1;
+  min-width: 220px;
+  max-width: 460px;
+  height: 28px;
+}
+.trend-zoom-track {
+  position: absolute;
+  top: 13px;
+  left: 0; right: 0;
+  height: 4px;
+  background: #d6dfe9;
+  border-radius: 2px;
+  pointer-events: none;
+}
+.trend-zoom-fill {
+  position: absolute;
+  top: 13px;
+  height: 4px;
+  background: #2563eb;
+  border-radius: 2px;
+  pointer-events: none;
+  transition: left 0.1s, width 0.1s;
+}
+/* Both range inputs occupy the full width of the slider so each
+   thumb can travel the entire range. Track itself is hidden — the
+   visible track + fill above do that job. pointer-events: none on
+   the track lets clicks pass through to the underlying thumb. */
+.trend-zoom-slider input[type="range"] {
+  position: absolute;
+  top: 0; left: 0;
+  width: 100%; height: 28px;
+  background: transparent;
+  appearance: none;
+  -webkit-appearance: none;
+  pointer-events: none;
+  margin: 0;
+}
+.trend-zoom-slider input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 16px; height: 16px;
+  border-radius: 50%;
+  background: #fff;
+  border: 2px solid #2563eb;
+  cursor: pointer;
+  pointer-events: auto;
+  margin-top: 0;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+}
+.trend-zoom-slider input[type="range"]::-moz-range-thumb {
+  width: 16px; height: 16px;
+  border-radius: 50%;
+  background: #fff;
+  border: 2px solid #2563eb;
+  cursor: pointer;
+  pointer-events: auto;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+}
+.trend-zoom-slider input[type="range"]::-webkit-slider-runnable-track {
+  background: transparent; border: none;
+}
+.trend-zoom-slider input[type="range"]::-moz-range-track {
+  background: transparent; border: none;
+}
+.trend-zoom-reset {
+  background: none;
+  border: 1px solid var(--line, #ccc);
+  border-radius: 4px;
+  padding: 3px 10px;
+  font-size: 11px;
+  color: var(--subdued, #555);
+  cursor: pointer;
+  font-family: inherit;
+}
+.trend-zoom-reset:hover { background: #fff; color: #2563eb; border-color: #2563eb; }
+.trend-zoom-reset.disabled {
+  color: #bbb; border-color: #e6e6e6; cursor: default;
+}
+

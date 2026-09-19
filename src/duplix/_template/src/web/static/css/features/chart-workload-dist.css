@@ -1,0 +1,57 @@
+/* Vertical workload bars */
+.workload-dist-v { width: 100%; }
+.vbar-row {
+  display: flex; align-items: flex-end;
+  gap: 18px;
+  height: 240px;
+  padding: 0 8px 4px 8px;
+  border-bottom: 1px solid var(--line);
+}
+.vbar-col {
+  flex: 1;
+  display: flex; flex-direction: column; align-items: center;
+  height: 100%;
+  min-width: 0;
+}
+.vbar-stack {
+  flex: 1;
+  display: flex; flex-direction: column-reverse;
+  justify-content: flex-start;
+  width: 100%;
+  align-items: stretch;
+}
+.vbar {
+  width: 70%;
+  margin: 0 auto;
+  min-width: 28px;
+  display: flex; flex-direction: column;
+  border-radius: 4px 4px 0 0;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-bottom: none;
+  background: var(--bg-card, #fff);
+}
+.vbar-seg {
+  display: flex; align-items: center; justify-content: center;
+  font-size: 11px; line-height: 1.1;
+  color: rgba(20, 20, 20, 0.75);
+  font-weight: 500;
+  min-height: 12px;
+  font-family: -apple-system, "Segoe UI", Roboto, sans-serif;
+  /* Subtle separator between stacked levels so adjacent shades are
+     still distinguishable when the palette runs out. */
+  box-shadow: inset 0 -1px 0 rgba(255, 255, 255, 0.4);
+}
+.vbar-seg-label { display: inline-block; }
+.vbar-label {
+  margin-top: 6px;
+  font-weight: 600; font-size: 13px;
+  color: #2a2a2a;
+  letter-spacing: 0.3px;
+}
+.vbar-count {
+  font-size: 11px;
+  color: var(--subdued, #666);
+  font-weight: 400;
+}
+

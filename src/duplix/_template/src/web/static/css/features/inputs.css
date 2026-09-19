@@ -1,0 +1,80 @@
+/* ---- inputs card: the only place data enters the app ---- */
+#inputs-card {
+  background: var(--bg-card);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 12px 14px 10px;
+  margin-bottom: 14px;
+}
+#inputs-card .card-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+#inputs-card h2 { margin: 0; font-size: 15px; }
+#inputs-card .small { font-size: 12px; margin: 8px 0 0; }
+
+.inputs-status {
+  font-size: 12px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 10px;
+}
+.inputs-status.ok { color: var(--ok); background: var(--ok-bg); }
+.inputs-status.warn { color: var(--warn); background: var(--warn-bg); }
+
+.inputs-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 10px;
+}
+.input-slot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 9px 11px;
+  border: 1px solid var(--line);
+  border-left-width: 3px;
+  border-radius: var(--radius);
+  background: var(--bg-elev);
+}
+.input-slot.loaded { border-left-color: var(--ok); }
+.input-slot.empty { border-left-color: var(--warn); }
+.input-slot.uploading { opacity: 0.6; }
+.input-slot-main { min-width: 0; }
+.input-slot-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+}
+.input-slot-file {
+  font-size: 12px;
+  margin-top: 2px;
+  overflow-wrap: anywhere;
+}
+.input-slot-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+/* The real <input type=file> is hidden; the label is the button. */
+.file-btn {
+  display: inline-block;
+  padding: 4px 10px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--primary);
+  background: var(--bg-card);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.file-btn:hover { background: var(--hover); }
+

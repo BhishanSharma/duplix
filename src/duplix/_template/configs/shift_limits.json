@@ -1,0 +1,28 @@
+{
+  "_comment": [
+    "Default per-(shift, role) workload bands. See allocator/caps.py.",
+    "Each entry has min (preferred), target (acceptable max), max (hard cap).",
+    "Engine semantics:",
+    "  - actual < min               => S1 below-preferred penalty",
+    "  - min <= actual <= target    => clean (no penalty)",
+    "  - target < actual <= max     => S1 above-preferred (escalating)",
+    "  - actual > max               => infeasible (H16 violation)",
+    "Validation rule: min <= target <= max, all positive integers.",
+    "Per-iteration overrides live in IN_Override (type=shift_limits, shift=..., role=...)",
+    "and clear automatically on Reset along with the rest of IN_Override.",
+    "Per user direction 2026-05-12 (Task 2): replaces the hardcoded tables",
+    "previously baked into allocator/caps.py."
+  ],
+  "shifts": {
+    "M":  { "STAFF": { "min": 22, "target": 23, "max": 24 },
+            "ZC":    { "min": 14, "target": 15, "max": 15 } },
+    "A":  { "STAFF": { "min": 22, "target": 23, "max": 24 },
+            "ZC":    { "min": 14, "target": 15, "max": 15 } },
+    "M1": { "STAFF": { "min": 22, "target": 23, "max": 24 },
+            "ZC":    { "min": 14, "target": 15, "max": 15 } },
+    "A1": { "STAFF": { "min": 22, "target": 23, "max": 24 },
+            "ZC":    { "min": 14, "target": 15, "max": 15 } },
+    "N":  { "STAFF": { "min": 19, "target": 20, "max": 20 },
+            "ZC":    { "min": 14, "target": 15, "max": 15 } }
+  }
+}

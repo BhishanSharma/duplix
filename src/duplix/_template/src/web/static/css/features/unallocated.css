@@ -1,0 +1,65 @@
+/* ---- Task 1: Unallocated panel + tab-pill badge ----
+   The Unallocated tab is an exception-state view. We make it prominent
+   without screaming red unless there's actually something to fix:
+   - count card sits neutral when count=0 (no warning tint)
+   - .warn modifier kicks in only when count>0
+   - tab-pill is hidden at zero so a clean run looks clean
+*/
+.tab-pill {
+  display: inline-block;
+  min-width: 18px;
+  margin-left: 4px;
+  padding: 0 6px;
+  background: var(--danger);
+  color: #fff;
+  border-radius: 9px;
+  font-size: 11px;
+  line-height: 16px;
+  font-weight: 600;
+  text-align: center;
+  vertical-align: middle;
+}
+.unalloc-header {
+  display: flex;
+  align-items: center;
+  gap: 24px;
+  padding: 16px;
+  background: var(--bg-card);
+  border-bottom: 1px solid var(--line);
+}
+.unalloc-count-card {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  padding: 12px 20px;
+  background: var(--bg-elev);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  min-width: 180px;
+}
+.unalloc-count-card.warn {
+  background: var(--danger-bg);
+  border-color: var(--danger);
+}
+.unalloc-count {
+  font-size: 32px;
+  font-weight: 700;
+  line-height: 1;
+}
+.unalloc-count-card.warn .unalloc-count { color: var(--danger); }
+.unalloc-label {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--subdued);
+  margin-top: 4px;
+}
+.unalloc-empty {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  color: var(--ok);
+  font-size: 16px;
+}
+.unalloc-empty .subdued { color: var(--subdued); font-size: 13px; }
+

@@ -1,0 +1,42 @@
+/* Flight Allocation console — minimal, no framework, no CDN.
+   Two columns of vertical space: topbar (fixed) + main (scroll).
+   Drawer slides from the right.
+
+   This file is the manifest. Every rule lives in a partial, grouped
+   the same way the JS is:
+
+     tokens / base / layout   the page frame
+     components/              reusable pieces (tables, cards, drawer…)
+     features/               one area of the app (charts, inputs, tabs…)
+
+   Order matters only in that tokens must come first and features may
+   override components. Adding a stylesheet is one line here.
+*/
+
+@import url("/static/css/tokens.css");
+@import url("/static/css/base.css");
+@import url("/static/css/layout.css");
+
+@import url("/static/css/components/run-status.css");
+@import url("/static/css/components/run-pill.css");
+@import url("/static/css/components/cards.css");
+@import url("/static/css/components/filters.css");
+@import url("/static/css/components/tables.css");
+@import url("/static/css/components/forms.css");
+@import url("/static/css/components/drawer.css");
+@import url("/static/css/components/modal.css");
+
+@import url("/static/css/features/dashboard.css");
+@import url("/static/css/features/chart-workload-dist.css");
+@import url("/static/css/features/chart-pie.css");
+@import url("/static/css/features/chart-shift-summary.css");
+@import url("/static/css/features/chart-trend.css");
+@import url("/static/css/features/roster.css");
+@import url("/static/css/features/shifts.css");
+@import url("/static/css/features/allocations.css");
+@import url("/static/css/features/unallocated.css");
+@import url("/static/css/features/recommender.css");
+@import url("/static/css/features/workload.css");
+@import url("/static/css/features/coverage.css");
+@import url("/static/css/features/inputs.css");
+@import url("/static/css/features/setup-sidebar.css");

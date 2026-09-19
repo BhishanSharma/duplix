@@ -1,0 +1,29 @@
+/* Pie chart for flights-per-shift */
+.flights-pie {
+  display: flex; flex-direction: column; align-items: center;
+  gap: 8px;
+}
+.pie-svg { width: 200px; height: 200px; }
+/* 2026-05-16: lighter, more subtle in-slice label — just the shift
+   letter, no %. The % lives in the legend, which is the right place
+   for precise numbers. */
+.pie-slice-label {
+  font-size: 11px; font-weight: 500;
+  fill: rgba(20, 20, 20, 0.78);
+  pointer-events: none;
+  font-family: -apple-system, "Segoe UI", Roboto, sans-serif;
+  letter-spacing: 0.3px;
+}
+.pie-legend {
+  display: grid; grid-template-columns: repeat(2, auto); gap: 4px 14px;
+  font-size: 12px;
+}
+.pie-legend-item { display: flex; align-items: center; gap: 6px; }
+.pie-swatch {
+  width: 12px; height: 12px;
+  border: 1px solid var(--line); border-radius: 2px;
+}
+.pie-shift { font-weight: 600; min-width: 22px; }
+.pie-count { color: var(--subdued, #666); }
+.pie-total { font-size: 12px; margin-top: 4px; }
+

@@ -1,0 +1,80 @@
+/* ---- drawer ---- */
+.drawer {
+  position: fixed;
+  right: 0;
+  top: 0;
+  bottom: 0;
+  width: min(700px, 90vw);
+  background: var(--bg-card);
+  border-left: 1px solid var(--line);
+  box-shadow: var(--shadow);
+  display: flex;
+  flex-direction: column;
+  z-index: 20;
+  animation: slidein 0.18s ease-out;
+}
+@keyframes slidein {
+  from { transform: translateX(100%); }
+  to   { transform: translateX(0); }
+}
+.drawer header {
+  display: flex;
+  align-items: center;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--line);
+}
+.drawer header h2 { margin: 0; font-size: 16px; }
+.drawer .close-btn { margin-left: auto; }
+.close-btn {
+  background: transparent;
+  border: 0;
+  font-size: 22px;
+  line-height: 1;
+  cursor: pointer;
+  color: var(--subdued);
+  padding: 0 6px;
+}
+.close-btn:hover { color: var(--text); }
+.drawer-body {
+  padding: 16px;
+  overflow-y: auto;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.drawer-actions {
+  display: flex;
+  gap: 8px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+
+#override-table input {
+  font: inherit;
+  padding: 3px 6px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  width: 100%;
+  min-width: 80px;
+}
+#override-table .row-actions { white-space: nowrap; }
+
+/* 2026-05-27 fix: force the override drawer's table area to be tall
+   enough that newly-added rows are obviously visible. Without a
+   min-height, an empty IN_Override collapses the scroll-wrap to ~30
+   px (just the header row) and rows added by clicking Add row look
+   "hidden" because the table area is barely visible between the
+   description and the Add row button. 320 px = ~8 rows worth. */
+#override-drawer .scroll-wrap {
+  min-height: 320px;
+}
+/* Make rows visually pop a little more so a freshly added blank
+   row is immediately obvious. */
+#override-table tbody tr {
+  border-bottom: 1px solid var(--line);
+}
+#override-table tbody tr:nth-child(even) {
+  background: var(--bg-elev);
+}
+

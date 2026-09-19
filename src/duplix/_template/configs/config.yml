@@ -1,0 +1,256 @@
+# Flight Allocation system — runtime config
+# All maps live here so onboarding a slightly different export shape only
+# requires editing this file, not Python source. See plan §1.5.1.
+
+allocation:
+  # Cycle year used to resolve year-less roster headers ("Mon,30Mar" -> 30-Mar-<cycle_year>).
+  cycle_year: 2026
+
+  # Default integration-run date. The launcher and CLI take --date to override.
+  # Sample SV portal contains only this date; AM roster covers it; staff roster
+  # ends 26-Apr so STAFF availability for this D will be empty (W010).
+  default_date: 2026-04-30
+
+# Step 3 solver parameters.
+solver:
+  # 2026-05-28 (user direction — restoring distribution quality): 350s
+  # was too aggressive. The solver was reaching FEASIBLE early but the
+  # S1b bucket-spread polish phase (which equalizes per-shift staff
+  # counts) kept getting cut short, producing -7 / -5 / -19 outliers in
+  # otherwise healthy shifts. 700s gives the solver the late-phase time
+  # it needs to drive max-min toward 0 across each bucket.
+  #
+  # Auto-retry (3 attempts in runner.py) is the safety net when a
+  # single attempt leaves UNALLOCATED >= 15 — worst-case total
+  # wall-clock = 3 * (700s + post-pass) ~ 40 min, ~12 min nominal.
+  # Never set to 0 — caused CP-SAT to search indefinitely on a prior
+  # attempt (99 min CPU, 4.6 GB RAM).
+  #
+  # Soft objective drives equality:
+  #   - S1 below-preferred: 100 per missing flight (pushes count up)
+  #   - S1 above-preferred: 50 / 500 / 1500 marginal (cap at +1/+2/+3)
+  #   - S1b bucket-spread:  600 per unit of (max - min) inside bucket
+  #     (bumped from 400 alongside the time bump — equalization is
+  #     more aggressive per-second so the budget pays off harder)
+  # Result: {23, 23} costs 100 vs {22, 24} costing 1750 — strongly
+  # prefers equal pairs over unequal pairs at the same sum.
+  max_seconds: 350
+  deficit_penalty_lambda: 100   # legacy knob; ignored by lex objective, kept for API compat
+
+# State / cycle-history.
+state:
+  staleness_max_days: 2          # plan §7.6 W003 threshold
+
+# ---------- I/O column maps ----------
+io:
+  sv_portal:
+    sheet: IN_SVportal           # was "Sheet1"; renamed under IN_*-prefix convention
+    # 2026-05-14: SV portal export format simplified — fewer columns,
+    # different header names. All aliases below (FLT/Flight No., DEP/Origin,
+    # ARR/Dest., STD/Dep., TYPE/A/C Type, LOAD/Pax Load) map to the same
+    # raw-row field so the reader picks up whichever is present. STA,
+    # AC-subtype, and Aircraft Owner are not in the new export — flights
+    # default to no-NORSE-owner / blank subtype.
+    columns:                     # source-col -> raw-row field (per §4.3)
+      FLT:           flight_id
+      "Flight No.":  flight_id
+      DEP:           departure
+      Origin:        departure
+      ARR:           arrival
+      "Dest.":       arrival
+      STD:           dep_time
+      "Dep.":        dep_time
+      STA:           arr_time
+      TYPE:          aircraft_type
+      AC:            aircraft_subtype
+      Aircraft:      aircraft_subtype
+      # 2026-05-14 new SV portal export: "A/C Type" holds the aircraft
+      # MODEL number (321, 789, 320 — what the legacy export called AC).
+      # Map to aircraft_subtype, not aircraft_type. aircraft_type
+      # (the J/B/K/X ops-class letter) is absent from the new export,
+      # so ops_class falls through to date-based DAY/NIGHT classification.
+      "A/C Type":    aircraft_subtype
+      DATE:          date
+      Date:          date
+      LOAD:          booked_pax_raw
+      "Booked Pax":  booked_pax_raw
+      "Pax Load":    booked_pax_raw
+      "Aircraft Owner": owner
+    date_format: "%m/%d/%Y"      # US-style m/d/Y per §1.5.1
+    # Step 1 drops rows whose Booked Pax does not match this regex.
+    pax_regex: '^\d+/\d+/\d+$'
+    # Phase 3 / Change 1 (2026-05-14, INTL overhaul): flights with
+    # DEP in this list are DROPPED at Step 1 extraction. The ARR-side
+    # pink-highlight machinery was removed in the same amendment;
+    # Gulf-3 ARR flights are plain domestic now.
+    routing_drop_dep_codes: [AUH, DOH, DXB]
+    # International airport list. Step 1 tags a flight with
+    # is_international=True if its **DEP** (3-letter code) is in this list
+    # (Change 9, 2026-05-14: DEP-side only; was DEP or ARR). Drives H12
+    # in Step 4 (newbies excluded) + the Change 4 D-75→STD coverage rule.
+    international_airport_codes:
+      - ATH
+      - ALA
+      - BAH
+      - BKK
+      - CAN
+      - CGK
+      - CMB
+      - DAC
+      - DMM
+      - DPS
+      - FJR
+      - GYD
+      - HAN
+      - HKG
+      - HKT
+      - JAF
+      - JED
+      - KBV
+      - KTM
+      - KUL
+      - KWI
+      - LGK
+      - MCT
+      - MED
+      - MLE
+      - MRU
+      - NBO
+      - PEN
+      - PVG
+      - RKT
+      - RUH
+      - SAI
+      - SEZ
+      - SGN
+      - SHJ
+      - SIN
+      - TAS
+      - TBS
+      - ZRH  # smoke test
+      - GVA
+
+  staff_roster:
+    sheet: IN_Staff             # was "Sheet1" — IN_*-prefixed naming since 2026-05-13
+    name_column: STAFF NAME     # was "Name" — input files use STAFF NAME
+    # Header pattern matches "Mon,30Mar" / "Tue,1Apr".
+    date_header_format: "%a,%d%b"
+    skip_blank_columns: true     # blank cols between Name and first date are dropped
+
+  am_roster:
+    sheet_glob: "IN_AM_Roster*"  # was "AM Roster*" — IN_*-prefixed naming
+    name_column: STAFF NAME      # was "NAME" — input files use STAFF NAME
+    # Header pattern matches "30-Apr".
+    date_header_format: "%d-%b"
+    # Number of leading rows after the header to skip (weekday sub-header in row 2).
+    subheader_rows_to_skip: 1
+
+# ---------- Status normalization ----------
+status:
+  # Aliases applied at read time before enum lookup.
+  # Note: keys are quoted so YAML 1.1 doesn't parse "OFF" / "ON" as booleans.
+  aliases:
+    "OFF": F                      # day off literal -> §4.1 F
+    # User direction 2026-05-10: future samples will write ZC entries
+    # as ZC/M, ZC/A, ... (current sample uses M/ZC, A/ZC). Both are
+    # accepted — the alias maps the new form to the canonical M/ZC.
+    "ZC/M":  "M/ZC"
+    "ZC/A":  "A/ZC"
+    "ZC/N":  "N/ZC"
+    "ZC/M1": "M1/ZC"
+    "ZC/A1": "A1/ZC"
+
+  # Recognized shift codes (current_shift will be populated when status is one of these).
+  shifts: [M, A, N, M1, A1]
+
+  # Recognized non-shift, non-assignable statuses (already in §4.1 enum).
+  non_shift_recognized: [U, F, "P/L", "C/L", "C/OFF", TR, ""]
+
+  # Recognized AM/ZC shift variants.
+  am_shifts: ["M/IGT", "A/IGT"]
+  zc_shifts: ["M/ZC", "A/ZC", "N/ZC", "M1/ZC", "A1/ZC"]
+
+  # Anything not matched above maps to CrewStatus.OTHER, assignable=False.
+  # Common occurrences in real AM data: N/CCC, L&T TRG, *Audit suffixes.
+  unrecognized_treatment: OTHER
+
+# ---------- Aircraft type -> ops_class lookup ----------
+# Per §4.13: day/night split is by date; other ops_classes (p2f, ferry, norse, test)
+# are derived from aircraft_type. Initial mapping below is a placeholder seeded from
+# the sample's TYPE values (G, H, J, K, P, T, X) — refine as user confirms semantics.
+# Any TYPE not listed falls through to date-based day/night routing.
+ops_class_by_aircraft_type:
+  # 2026-05-11 (revised per user): TYPE-letter routing rules.
+  #   H → P2F                                (passenger-to-freighter)
+  #   J → date-based DAY/NIGHT               (passenger normal)
+  #   X → handled in code: dep==arr → TEST, dep!=arr → FERRY
+  #   B → CHARTER                            (charter flight, own class)
+  #   K / P / T / G → FERRY                  (legacy ferry markers)
+  # TEST / FERRY / CHARTER are now allocated as normal flights and
+  # counted under workload (no per-staff special cap). The cleaned
+  # output groups them on one SpecialOps group for visibility.
+  H: p2f
+  B: charter
+  K: ferry
+  P: ferry
+  T: ferry
+  G: ferry
+  # 2026-05-27 (user direction): TYPE=W flights route to special ops
+  # (the FERRY group). Previously they fell
+  # through to date-based DAY/NIGHT routing and ended up in DayOps.
+  W: ferry
+
+# Post-pass §3 (user direction 2026-05-12) — when a handler has a P2F
+# flight, the surrounding domestic flights get removed from their list
+# (briefing / paperwork time) and redistributed via §4. Tolerance is
+# the half-width of the matching window around each anchor (D-3h,
+# D-1h, D+20min).
+#
+# 2026-05-28: ``logic_v2`` switches to the union-window-per-chain rule.
+# For each P2F at STD=T, the {owner P2F handler, pre-planner P2F
+# handler} chain loses ALL flights with STD in [T-2h, T+1h]. The P2F
+# post-pass also runs BEFORE the INTL post-pass when this flag is on,
+# so INTL D-75 doesn't remove a flight the P2F window would already
+# free up. Default false in main builds; the "p2f-logic" variant zip
+# ships with this set true.
+p2f_adjustment:
+  tolerance_minutes: 30
+  logic_v2: false
+
+ops_class_norse_owner_codes:
+  # NORSE flights are identified by the Aircraft Owner column (per user
+  # direction 2026-05-11). Case-insensitive equality match against any
+  # code below routes the flight to NORSE. Replaces the legacy
+  # (TYPE, Aircraft) compound rule — owners are explicit in the new
+  # export, so we no longer triangulate via type+subtype.
+  - N0
+  - AC-789
+
+# ---------- GULF routing (2026-05-19) ----------
+# A flight is GULF when its DEP airport is in the list below OR its
+# Aircraft Owner / TYPE letter equals one of the listed carrier codes
+# (case-insensitive). GULF flights land on the dedicated
+# GULF class so the assigner can see them for reference,
+# but Step 3's allocator does NOT read that sheet — they are never
+# assigned to any staff.
+ops_class_gulf_dep_codes:
+  - AUH
+  - DOH
+  - DXB
+# 2026-05-21 (user direction): owner-based Gulf detection (QR) dropped.
+ops_class_gulf_owner_codes: []
+
+# ---------- User-defined extraction filters (2026-05-25) ----------
+# A flight matching ANY filter below is routed to the GULF class
+# (extract-only — no staff allocation). Each filter is a dict with any
+# subset of fields. Empty / missing field = "don't match on that
+# field". Match is AND across specified fields, case-insensitive
+# exact. Example entries:
+#   - ac_owner: N0
+#   - ac_type: X
+#   - dep: BLR
+#     arr: COK
+#   - custom_header: REG
+#     custom_value: VT-IKW
+# Edit via the Override drawer's "Extraction Filters" form or by hand.
+extraction_filters: []

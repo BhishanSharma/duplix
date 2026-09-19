@@ -1,0 +1,17 @@
+# Runtime dependencies for flight-alloc.
+# Mirrors pyproject.toml [project.dependencies].
+#
+# Install with:
+#   pip install -r requirements.txt
+#
+# Preferred alternative (also installs the `flight-alloc` entry point and
+# registers the package so `import src` works from anywhere):
+#   pip install -e .
+#
+# pandas + fastparquet were dropped: nothing imports them, and
+# fastparquet's wheel build was the slowest part of a first-run setup.
+
+openpyxl~=3.1
+pydantic~=2.7
+ortools~=9.15
+pyyaml~=6.0

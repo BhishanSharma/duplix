@@ -1,0 +1,163 @@
+/* ---- dashboard layout ----
+   - Keeps dashboard chart sections aligned.
+   - Workload distribution and flights-per-shift sit side-by-side.
+   - Responsive layout collapses cleanly on smaller screens.
+   - Prevents charts/tables from causing horizontal overflow. */
+
+.ds-chart-pair {
+  display: grid;
+  grid-template-columns: minmax(0, 1.15fr) minmax(320px, 0.85fr) minmax(260px, 0.6fr);
+  gap: 18px;
+  align-items: stretch;
+  margin-bottom: 28px;
+}
+
+.ds-chart-cell {
+  min-width: 0;
+  padding: 18px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--bg-elev);
+  box-sizing: border-box;
+}
+
+.ds-chart-cell h2 {
+  margin: 0 0 6px;
+  line-height: 1.3;
+}
+
+.ds-chart-cell > .subdued {
+  min-height: 38px;
+  margin: 0 0 16px;
+  line-height: 1.45;
+}
+
+.zc-selector { display: flex; flex-direction: column; }
+#zc-selector-search {
+  width: 100%; box-sizing: border-box; padding: 8px 10px;
+  border: 1px solid var(--line); border-radius: var(--radius); font: inherit;
+}
+#zc-selector-list { margin-top: 12px; min-height: 0; }
+.zc-selected { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
+.zc-selected-badge {
+  padding: 4px 7px; border-radius: 999px; background: #d4edda;
+  border: 1px solid #28a745; color: #155724; font-size: 12px;
+}
+.zc-selected-badge b { font-size: 10px; margin-left: 3px; }
+.zc-scroll-list { max-height: 245px; overflow-y: auto; padding-right: 3px; }
+.zc-list-section + .zc-list-section { margin-top: 12px; }
+.zc-list-section h3 {
+  margin: 0 0 5px; color: var(--subdued); font-size: 11px;
+  letter-spacing: .04em; text-transform: uppercase;
+}
+.zc-person {
+  width: 100%; display: flex; justify-content: space-between; gap: 8px;
+  padding: 7px 8px; border: 0; border-radius: var(--radius); background: transparent;
+  color: var(--text); font: inherit; text-align: left; cursor: pointer;
+}
+.zc-person:hover { background: var(--hover); }
+.zc-person small { color: var(--subdued); white-space: nowrap; }
+
+/* Workload distribution chart */
+#ds-workload-dist {
+  width: 100%;
+  min-width: 0;
+}
+
+/* Flights per shift pie chart */
+#ds-flights-pie {
+  width: 100%;
+  min-height: 240px;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+}
+
+/* Shift summary table */
+#ds-shift-summary {
+  overflow-x: auto;
+}
+
+#ds-shift-summary table {
+  min-width: 620px;
+}
+
+/* Flight trend */
+#ds-flight-trend {
+  min-width: 0;
+}
+
+/* Roster section */
+#ds-roster {
+  margin-top: 4px;
+}
+
+/* Section headings */
+#ds-charts-block > .block-heading {
+  margin: 28px 0 5px;
+  padding-top: 4px;
+}
+
+#ds-charts-block > .block-heading + .subdued {
+  margin: 0 0 12px;
+  line-height: 1.45;
+}
+
+/* Risk table */
+#ds-risk-table {
+  table-layout: fixed;
+  width: 100%;
+}
+
+#ds-risk-table th,
+#ds-risk-table td {
+  overflow-wrap: anywhere;
+}
+
+/* Medium screens */
+@media (max-width: 1100px) {
+  .ds-chart-pair {
+    grid-template-columns: minmax(0, 1fr) minmax(280px, 0.85fr);
+    gap: 14px;
+  }
+
+  .ds-chart-cell {
+    padding: 16px;
+  }
+
+  .zc-selector { grid-column: 1 / -1; }
+}
+
+/* Tablet */
+@media (max-width: 900px) {
+  .ds-chart-pair {
+    grid-template-columns: 1fr;
+    gap: 14px;
+  }
+
+  #ds-flights-pie {
+    min-height: 0;
+    padding: 8px 0;
+  }
+}
+
+/* Mobile */
+@media (max-width: 600px) {
+  .ds-chart-pair {
+    gap: 12px;
+    margin-bottom: 20px;
+  }
+
+  .ds-chart-cell {
+    padding: 14px;
+  }
+
+  #ds-risk-table {
+    min-width: 560px;
+    table-layout: auto;
+  }
+
+  #ds-shift-summary table {
+    min-width: 560px;
+  }
+}

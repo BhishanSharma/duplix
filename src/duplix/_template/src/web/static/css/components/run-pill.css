@@ -1,0 +1,16 @@
+/* ---- run status pill (replaces the old log tray) ---- */
+.run-pill {
+  font-size: 12px;
+  font-weight: 600;
+  padding: 3px 10px;
+  border-radius: 11px;
+  white-space: nowrap;
+}
+.run-pill-busy { color: var(--primary); background: var(--plan-blue); }
+.run-pill-ok { color: var(--ok); background: var(--ok-bg); }
+.run-pill-err { color: var(--danger); background: var(--danger-bg); }
+
+/* Plan / Allocate stay clickable without all three uploads — the
+   server explains what's missing — but they're visibly de-emphasised. */
+.needs-inputs { opacity: 0.65; }
+

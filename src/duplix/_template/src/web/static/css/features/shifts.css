@@ -1,0 +1,21 @@
+/* ---- shift color coding (Allocations tab, user direction 2026-05-16) ----
+   M1 / A1 made markedly darker than their primary counterparts so they
+   stand out in long lists. Per user feedback "M and M1 blue look the
+   same — make one darker (M1)" (2026-05-16 batch). */
+.staff-shift-m   { background: #cfe7ff; }   /* light blue     — early morning */
+.staff-shift-m1  { background: #6fa8dc; color: #fff; }  /* deep blue — early secondary, white text */
+.staff-shift-a   { background: #ffe2b8; }   /* light orange   — afternoon */
+.staff-shift-a1  { background: #e8843c; color: #fff; }  /* deep orange — afternoon secondary, white text */
+.staff-shift-n   { background: #d6c7ec; }   /* lavender       — night */
+.shift-legend {
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 18px; border-top: 1px solid var(--line);
+  font-size: 12px; color: var(--subdued, #666);
+}
+.shift-legend-label { font-weight: 600; margin-right: 4px; }
+.shift-chip {
+  padding: 2px 10px; border-radius: 12px;
+  border: 1px solid var(--line); font-weight: 600;
+  color: #333;
+}
+

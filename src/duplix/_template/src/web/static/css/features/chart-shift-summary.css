@@ -1,0 +1,26 @@
+/* Shift summary insight table */
+.shift-summary-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+.shift-summary-table th,
+.shift-summary-table td {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+  font-size: 13px;
+}
+.shift-summary-table th {
+  font-weight: 700;
+  background: var(--bg-card, #fafbfc);
+  color: var(--subdued, #555);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.shift-summary-table td.warn {
+  color: #b3540f;
+  font-weight: 700;
+}
+.shift-summary-hint { font-size: 11px; margin-top: 6px; }
+

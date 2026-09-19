@@ -1,0 +1,35 @@
+:root {
+  --bg: #f4f5f7;
+  --bg-card: #ffffff;
+  --bg-elev: #fafbfc;
+  --text: #1f2328;
+  --subdued: #57606a;
+  --line: #d0d7de;
+  --primary: #0d4f9e;
+  --primary-text: #ffffff;
+  --warn: #c08400;
+  --warn-bg: #fff8c5;
+  --danger: #cf222e;
+  --danger-bg: #ffebe9;
+  --ok: #1f883d;
+  --ok-bg: #dafbe1;
+  --hover: #f6f8fa;
+  --plan-blue: #cfe2ff;
+  --reliev-green: #d1f5d3;
+  /* Per user direction 2026-05-11: dep/arr cells in the Allocations
+     table take colored fills matching the workbook. Yellow for
+     international flights (DEP-side only, Change 9). Phase 3
+     (2026-05-14, INTL overhaul) dropped the pink Gulf-3 routing
+     fill — Gulf-3 DEP flights are now excluded at Step 1, Gulf-3
+     ARR flights are plain domestic. */
+  /* 2026-05-16 (user): INTL switched yellow -> soft pink so it no
+     longer clashes with the A-shift orange or with warning yellow. */
+  --intl-yellow: #ffd6e7;
+  /* Task 8 (2026-05-12): test + ferry flights take a soft blue tint
+     in the dep/arr cells so the assigner spots special-ops on sight.
+     Distinct from --plan-blue (which marks a row's planned_by cell). */
+  --special-blue: #d6e9ff;
+  --shadow: 0 6px 24px rgba(0,0,0,0.10);
+  --radius: 6px;
+}
+

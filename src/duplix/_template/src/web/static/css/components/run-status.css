@@ -1,0 +1,31 @@
+/* ---- run status block ---- */
+.run-status {
+  display: flex;
+  gap: 24px;
+  background: var(--bg-card);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 14px 18px;
+  margin-bottom: 20px;
+  flex-wrap: wrap;
+}
+.status-cell { display: flex; flex-direction: column; gap: 2px; min-width: 120px; }
+.status-cell .label {
+  font-size: 11px;
+  color: var(--subdued);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 12px;
+  background: var(--ok-bg);
+  color: var(--ok);
+}
+.badge.warn { background: var(--warn-bg); color: var(--warn); }
+.badge.danger { background: var(--danger-bg); color: var(--danger); }
+.badge.subdued { background: #eaeef2; color: var(--subdued); }
+
