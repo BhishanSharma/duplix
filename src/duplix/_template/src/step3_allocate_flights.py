@@ -48,7 +48,6 @@ from .allocator.postsolve import (
 from .allocator.windows import std_to_ops_day_minutes
 from .config import Config, load_config
 from .io.readers import (
-    read_am_roster,
     read_norse_handlers,
     read_p2f_nominations,
     read_per_staff_overrides,
@@ -58,8 +57,8 @@ from .io.readers import (
     read_skip_intl_removal_overrides,
     read_skip_p2f_buffer_overrides,
     read_waive_h10_pairs,
-    workbook_from_bytes,
 )
+from .io.roster_library import read_library
 from .state import AppState
 from .schemas import (
     AllocationResult,
@@ -75,7 +74,7 @@ from .schemas import (
     StaffMember,
     WarningRow,
 )
-from .solver.allocator_cpsat import solve_allocation
+from .solver.allocator_cpsat import AllocationSolverResult, solve_allocation
 
 # ---------- ZC shift recovery helpers ----------
 # 2026-05-27 (centralization): these three maps are DERIVED from the
@@ -404,11 +403,7 @@ def run(
     overrides = list(state.overrides)
     prev_staff_by_key = _snapshot_prev_staff(state)
 
-    wb_am = workbook_from_bytes(state.input_bytes("am_roster"))
-    try:
-        am_rows = read_am_roster(wb_am, config)
-    finally:
-        wb_am.close()
+    am_rows = read_library(state, "am_roster", config, [d_day])
 
     # Build a name -> employee_id map for resolving override rows. Names
     # come from BOTH availability (STAFF) AND the AM roster (AM/ZC).
@@ -1175,7 +1170,51 @@ def run(
         # 2026-05-18 sick-call iteration: pin prior allocation in place.
         pinned_assignments=pinned_assignments or None,
     )
-    feasible = result.status in ("OPTIMAL", "FEASIBLE")
+
+    # --- Greedy fallback (2026-09-22) ----------
+    # CP-SAT is an EXACT solver: if any combination of hard constraints
+    # is mutually unsatisfiable, it reports INFEASIBLE and hands back
+    # ZERO assignments for the WHOLE day — even for flights that had
+    # nothing to do with the conflict (see the 2026-09-22 incident:
+    # a static N/ZC workload floor with zero actual night-ops flights
+    # took down all 2117 flights, not just the 3 N/ZC staff). The
+    # solver-side fix (soft ZC floor) addresses THAT specific cause,
+    # but as a safety net against any future/unknown infeasibility, if
+    # CP-SAT comes back without a usable solution we fall back to a
+    # greedy pass that only enforces the non-negotiable physical rules
+    # (H1 one-staff-per-flight, H10 spacing, H16 caps) and ignores
+    # every soft objective. Degraded (unbalanced) but never empty.
+    if result.status not in ("OPTIMAL", "FEASIBLE") or not result.assignments:
+        print(
+            f"  !! CP-SAT returned status={result.status} with "
+            f"{len(result.assignments)} assignment(s) — falling back to "
+            "the greedy allocator (H1/H10/H16 only, no workload "
+            "balancing) so flights still get placed. Review the "
+            "Workload tab manually after this run."
+        )
+        from .allocator.greedy_fallback import greedy_allocate
+        fallback_assignments = greedy_allocate(
+            flights, staff_today, matrix, ops_day=d_day,
+        )
+        warnings.append(WarningRow(
+            severity=Severity.ERROR, code="W299", date=d_day,
+            message=(
+                f"CP-SAT could not produce a solution (status="
+                f"{result.status}). Used the greedy fallback instead: "
+                f"{len(fallback_assignments)}/{len(flights)} flights "
+                "placed WITHOUT workload balancing, handover, INTL "
+                "spacing, or P2F-cap logic. Review the Workload and "
+                "Warnings tabs before sending this out, and report this "
+                "run so the underlying CP-SAT infeasibility gets fixed."
+            ),
+        ))
+        result = AllocationSolverResult(
+            status=f"{result.status}_GREEDY_FALLBACK",
+            assignments=fallback_assignments,
+            wall_clock_seconds=result.wall_clock_seconds,
+        )
+
+    feasible = result.status in ("OPTIMAL", "FEASIBLE") or "GREEDY_FALLBACK" in result.status
     counts["FEASIBLE"] = int(feasible)
     counts["ASSIGNED"] = len(result.assignments)
     # UNALLOCATED includes both flights the solver couldn't place AND the

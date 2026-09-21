@@ -579,6 +579,11 @@ class AvailabilityRow(BaseModel):
     assignable: bool
     current_shift: ShiftCode | None = None
     license: str | None = None
+    # Which roster the person comes from (STAFF for the staff roster, AM
+    # for the AM roster), before any /ZC promotion. Lets a ZC be taken
+    # back to what they were when the assigner removes them on the
+    # dashboard. None for synthetic rows (add_staff).
+    origin_role: Role | None = None
 
 
 class Severity(StrEnum):

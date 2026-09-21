@@ -19,6 +19,7 @@ this module.
 from __future__ import annotations
 
 import io
+import re
 from collections.abc import Mapping, Sequence
 from datetime import date as date_type
 from datetime import datetime, time
@@ -378,6 +379,162 @@ class MissingEmployeeIdError(ValueError):
             "save, and re-run."
         )
 
+# ---- header vocabulary for the wide rosters -------------------------------
+#
+# The monthly staff roster the rostering team publishes looks like:
+#
+#     row 1   CLC STAFF ROSTER FROM 31 AUG TILL 27 SEP 2026   (banner)
+#     row 2   S.no | Name | IGA | add info | Contact | Mon,31Aug | Tue,1Sep | ...
+#     row 3+  1 | YOGESH BADHAN | 10001 | P2F/Corendon | 78389... | F | A | ...
+#
+# so the reader must (a) find the header row instead of assuming row 1,
+# and (b) accept the names that file uses for each column. Every alias
+# list is matched case-insensitively and the configured name always wins.
+
+_NAME_ALIASES: tuple[str, ...] = ("Name", "STAFF NAME", "Staff Name", "Employee Name")
+_ID_ALIASES: tuple[str, ...] = (
+    "ID", "Employee_ID", "employee_id", "EmployeeID", "IGA", "IGA No",
+    "IGA No.", "IGA ID", "IGA Number", "Emp ID", "Emp. ID",
+)
+_LICENSE_ALIASES: tuple[str, ...] = (
+    "License", "Licence", "add info", "Additional Info", "Add. Info",
+)
+
+# Rows above the header (a title banner, a blank spacer) are skipped;
+# don't scan the whole sheet for one.
+_HEADER_SCAN_ROWS = 15
+_YEAR_RE = re.compile(r"\b(20\d{2})\b")
+
+
+def _normalize_license(value: Any) -> str | None:
+    """'P2F/Corendon' -> 'P2F+Corendon'; 'P2F/' -> 'P2F'; '/' or blank -> None.
+
+    The roster's "add info" column separates qualifications with '/', and
+    uses a bare '/' for "none". Downstream code only asks whether the
+    string contains 'P2F', so the joined form keeps that working while
+    the placeholder slash stops being a fake licence.
+    """
+    if value is None:
+        return None
+    parts = [p.strip() for p in re.split(r"[/+,]", str(value)) if p.strip()]
+    return "+".join(parts) if parts else None
+
+
+def _find_header_row(
+    rows: Sequence[Sequence[Any]], name_candidates: Sequence[str],
+) -> int:
+    """Index of the first row (within the scan window) that has a
+    name-column label in it; 0 when none does, so the caller's existing
+    'name column not in header' error still fires with the first row."""
+    wanted = {n.strip().lower() for n in name_candidates}
+    for i, row in enumerate(rows[:_HEADER_SCAN_ROWS]):
+        for cell in row:
+            if isinstance(cell, str) and cell.strip().lower() in wanted:
+                return i
+    return 0
+
+
+_WEEKDAY_RE = re.compile(r"^(mon|tue|wed|thu|fri|sat|sun)[a-z]*\.?$", re.I)
+
+
+def _looks_like_subheader(
+    row: Sequence[Any], name_idx: int, date_cols: Iterable[int],
+) -> bool:
+    """A weekday strip under the header ('Mon Tue Wed ...') or a row with
+    no name in it — as opposed to the first real staff row."""
+    name = row[name_idx] if name_idx < len(row) else None
+    if not (isinstance(name, str) and name.strip()):
+        return True
+    cells = [row[c] for c in date_cols if c < len(row) and row[c] not in (None, "")]
+    return bool(cells) and all(
+        isinstance(c, str) and _WEEKDAY_RE.match(c.strip()) for c in cells
+    )
+
+
+def _banner_year(rows: Sequence[Sequence[Any]], header_idx: int) -> int | None:
+    """A 4-digit year mentioned in the rows above the header, if any."""
+    for row in rows[:header_idx]:
+        for cell in row:
+            if isinstance(cell, str):
+                m = _YEAR_RE.search(cell)
+                if m:
+                    return int(m.group(1))
+    return None
+
+
+def _resolve_date_columns(
+    header: Sequence[Any], fmt: str, ref_year: int,
+    anchor: date_type | None = None,
+) -> dict[int, date_type]:
+    """Map column index -> date for every date-looking header cell.
+
+    Headers like 'Mon,31Aug' carry no year, and a roster can run across
+    New Year, so the year is *derived*, not configured:
+
+      * with a weekday in the header ('Mon,31Aug') the year is the one,
+        within a year of ``ref_year``, in which 31 Aug is a Monday;
+      * otherwise the year starts at ``ref_year`` and rolls forward
+        whenever the dates step backwards (Dec -> Jan).
+
+    ``anchor`` (the workbook's last-modified date) settles the year for
+    weekday-less headers like '26-May': the first date takes whichever
+    year lands it nearest the anchor, so a roster keeps resolving
+    correctly year after year without a config edit.
+
+    Real Excel date cells are taken as they are.
+    """
+    has_weekday = "%a" in fmt or "%A" in fmt
+    out: dict[int, date_type] = {}
+    prev: date_type | None = None
+    for i, h in enumerate(header):
+        d: date_type | None = None
+        if isinstance(h, datetime):
+            d = h.date()
+        elif isinstance(h, date_type):
+            d = h
+        elif isinstance(h, str) and h.strip():
+            s = h.strip()
+            base = prev.year if prev else ref_year
+            years = [base, base + 1, base - 1]
+            if has_weekday:
+                # The weekday name pins the year down; try nearby years.
+                fallback: date_type | None = None
+                for y in years:
+                    try:
+                        dt = datetime.strptime(f"{s} {y}", f"{fmt} %Y")
+                    except ValueError:
+                        continue
+                    fallback = fallback or dt.date()
+                    if dt.strftime("%a").lower() == s[:3].lower():
+                        d = dt.date()
+                        break
+                if d is None:
+                    d = fallback
+            elif prev is None and anchor is not None:
+                best: date_type | None = None
+                for y in (anchor.year - 1, anchor.year, anchor.year + 1):
+                    try:
+                        cand = datetime.strptime(f"{s} {y}", f"{fmt} %Y").date()
+                    except ValueError:
+                        continue
+                    if best is None or abs((cand - anchor).days) < abs((best - anchor).days):
+                        best = cand
+                d = best
+            else:
+                for y in years[:2]:
+                    try:
+                        dt = datetime.strptime(f"{s} {y}", f"{fmt} %Y")
+                    except ValueError:
+                        continue
+                    d = dt.date()
+                    if prev is not None and d < prev:
+                        continue          # went backwards: try next year
+                    break
+        if d is not None:
+            out[i] = d
+            prev = d
+    return out
+
 
 def _find_header_idx(header: list[Any], *names: str) -> int | None:
     """Return the column index of the first header in ``names`` that matches
@@ -410,32 +567,51 @@ def _read_wide_roster_sheet(
 
     Same pattern for ``License``: blank → None.
     """
-    rows_iter = ws.iter_rows(values_only=True)
-    header = list(next(rows_iter))
-    for _ in range(skip_subheader_rows):
-        next(rows_iter, None)
-    # Case-insensitive name-column match — config might say "Name" but
-    # the file has "NAME" or "name". Per user direction 2026-05-11.
+    all_rows = [list(r) for r in ws.iter_rows(values_only=True)]
+    if not all_rows:
+        raise ValueError("uploaded roster sheet is empty")
+    name_candidates = [name_column, *_NAME_ALIASES]
+    header_idx = _find_header_row(all_rows, name_candidates)
+    header = all_rows[header_idx]
+    body = all_rows[header_idx + 1:]
+    # Case-insensitive name-column match; the configured label first,
+    # then the aliases the real files use.
     name_idx: int | None = None
-    target = name_column.strip().lower()
-    for i, h in enumerate(header):
-        if isinstance(h, str) and h.strip().lower() == target:
-            name_idx = i
+    for cand in name_candidates:
+        target = cand.strip().lower()
+        for i, h in enumerate(header):
+            if isinstance(h, str) and h.strip().lower() == target:
+                name_idx = i
+                break
+        if name_idx is not None:
             break
     if name_idx is None:
         raise ValueError(
             f"name column {name_column!r} (case-insensitive) "
             f"not in header {header}"
         )
-    # 2026-05-21: canonical header is "ID"; legacy names kept for
-    # back-compat with older workbook exports.
-    id_idx = _find_header_idx(header, "ID", "Employee_ID", "employee_id", "EmployeeID")
-    lic_idx = _find_header_idx(header, "License", "license")
-    date_by_idx: dict[int, date_type] = {}
-    for i, h in enumerate(header):
-        d = _parse_date_header(h, date_header_format, cycle_year)
-        if d is not None:
-            date_by_idx[i] = d
+    # Canonical ID header is "ID"; "IGA" is what the monthly roster uses.
+    id_idx = _find_header_idx(header, *_ID_ALIASES)
+    lic_idx = _find_header_idx(header, *_LICENSE_ALIASES)
+    banner = _banner_year(all_rows, header_idx)
+    anchor: date_type | None = None
+    if banner is None:
+        props = getattr(getattr(ws, "parent", None), "properties", None)
+        stamp = getattr(props, "modified", None) or getattr(props, "created", None)
+        anchor = stamp.date() if isinstance(stamp, datetime) else None
+    ref_year = banner or cycle_year
+    date_by_idx = _resolve_date_columns(
+        header, date_header_format, ref_year, anchor,
+    )
+    # The AM roster may or may not carry a weekday strip under the
+    # header, so the configured skip count only applies to rows that
+    # actually look like one — never to the first staff row.
+    for _ in range(skip_subheader_rows):
+        if body and _looks_like_subheader(body[0], name_idx, date_by_idx):
+            body = body[1:]
+        else:
+            break
+    rows_iter = iter(body)
     # Per user direction 2026-05-21: Employee_ID is now mandatory.
     # Header must exist AND every row must have a non-blank value.
     # The previous auto-gen fallback (``STAFF_NNN`` / ``AM_NNN``) was
@@ -443,7 +619,7 @@ def _read_wide_roster_sheet(
     # solver identity — the roster team has to assign distinct IDs.
     sheet_label = ws.title if hasattr(ws, "title") else "<sheet>"
     if id_idx is None:
-        raise MissingEmployeeIdError(sheet_label, ["<Employee_ID column missing>"])
+        raise MissingEmployeeIdError(sheet_label, ["<ID / IGA column missing>"])
     out: list[tuple[str, str | None, str, dict[date_type, CrewStatus], dict[date_type, str]]] = []
     blank_id_names: list[str] = []
     for row in rows_iter:
@@ -457,17 +633,25 @@ def _read_wide_roster_sheet(
             v = row[id_idx]
             if isinstance(v, str) and v.strip():
                 emp_id = v.strip()
+            elif isinstance(v, float) and v.is_integer():
+                emp_id = str(int(v))          # 10001.0 -> "10001"
             elif v is not None and not isinstance(v, str):
                 emp_id = str(v).strip()
         if not emp_id:
-            blank_id_names.append(name_val.strip())
+            # A footer / note line (text in the name column, nothing in
+            # any date column) is not a staff row; a real staff row
+            # without an ID still fails loudly below.
+            has_status = any(
+                c < len(row) and row[c] not in (None, "")
+                for c in date_by_idx
+            )
+            if has_status:
+                blank_id_names.append(name_val.strip())
             continue
         # License: from cell if present and non-blank, else None.
         license_val: str | None = None
         if lic_idx is not None and lic_idx < len(row):
-            v = row[lic_idx]
-            if isinstance(v, str) and v.strip():
-                license_val = v.strip()
+            license_val = _normalize_license(row[lic_idx])
         statuses: dict[date_type, CrewStatus] = {}
         raw_statuses: dict[date_type, str] = {}
         for col_idx, d in date_by_idx.items():

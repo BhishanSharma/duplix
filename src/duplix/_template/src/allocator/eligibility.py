@@ -22,7 +22,7 @@ Hard constraints enforced HERE:
 
 Hard constraints NOT enforced here (deferred to the solver):
   H1   exactly one staff per flight       — solver objective
-  H10  10-min spacing                     — solver IntervalVar
+  H10  15-min spacing (10 in relaxed bands) — solver at-most-one pairs
   H16  hard caps                          — solver constraint
 
 Hard constraints removed in round-3 (now SOFT, handled in the solver):

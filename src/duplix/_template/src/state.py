@@ -6,8 +6,12 @@ every engine stage reads its inputs from this object and writes its
 outputs back into it; the web layer serialises it to JSON for the
 dashboard and to a one-off .xlsx for the Download button.
 
-Lifetime is the server process. Restarting the server clears everything
-and the operator re-uploads the day's three files.
+Lifetime is the server process. Restarting the server clears the
+results, the overrides and the daily flight schedule. The two roster
+files are the exception: they cover a whole period, so every upload is
+also kept on disk (``roster_store``) and reloaded at start-up, and
+several rosters can be held at once — the one that covers the
+allocation date is the one that gets used.
 
 Threading: ``ThreadingHTTPServer`` means several requests can touch the
 state at once, so every mutation goes through ``STATE.lock``.
@@ -15,12 +19,16 @@ state at once, so every mutation goes through ``STATE.lock``.
 
 from __future__ import annotations
 
+import hashlib
 import threading
+import uuid
 from dataclasses import dataclass, field
+from collections.abc import Iterable
 from datetime import date as date_t
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
+from . import roster_store
 from .schemas import (
     AllocationRow,
     AvailabilityRow,
@@ -99,6 +107,39 @@ class UploadedInput:
 
 
 @dataclass
+class RosterFile:
+    """One uploaded period roster. Unlike the daily schedule, several of
+    these can be held at once (Aug-Sep, then Sep-Oct, ...); ``dates`` is
+    every calendar date the workbook has a column for."""
+
+    id: str
+    kind: str
+    filename: str
+    data: bytes
+    dates: list[date_t]
+    uploaded_at: datetime = field(default_factory=datetime.now)
+
+    @property
+    def start(self) -> date_t | None:
+        return min(self.dates) if self.dates else None
+
+    @property
+    def end(self) -> date_t | None:
+        return max(self.dates) if self.dates else None
+
+    def as_json(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "filename": self.filename,
+            "size_kb": round(len(self.data) / 1024, 1),
+            "uploaded_at": self.uploaded_at.isoformat(timespec="seconds"),
+            "start": self.start.isoformat() if self.start else "",
+            "end": self.end.isoformat() if self.end else "",
+            "days": len(self.dates),
+        }
+
+
+@dataclass
 class AppState:
     """Everything the app knows, for one operator, for one day."""
 
@@ -106,6 +147,9 @@ class AppState:
 
     # ---- inputs (uploaded from the dashboard and the Setup sidebar) ----
     inputs: dict[str, UploadedInput] = field(default_factory=dict)
+    # Period rosters (SETUP_INPUT_KINDS), oldest upload first. Kept apart
+    # from ``inputs`` because there can be several per kind.
+    rosters: dict[str, list[RosterFile]] = field(default_factory=dict)
     run_date: date_t | None = None
 
     # ---- overrides (edited via the drawer) ----
@@ -140,26 +184,50 @@ class AppState:
     # ---------------- inputs ----------------
 
     def set_input(self, kind: str, filename: str, data: bytes) -> UploadedInput:
+        """Store a single-file input (the daily schedule). Rosters go
+        through ``add_roster`` because they accumulate."""
         if kind not in INPUT_KINDS:
             raise ValueError(f"unknown input kind {kind!r}")
+        if kind in SETUP_INPUT_KINDS:
+            raise ValueError(f"{kind!r} is a period roster; use add_roster()")
         with self.lock:
             up = UploadedInput(kind=kind, filename=filename, data=data)
             self.inputs[kind] = up
             return up
 
     def clear_input(self, kind: str) -> None:
+        """Drop an input. For a roster kind that means every stored roster
+        of that kind, from memory and from disk."""
         with self.lock:
-            self.inputs.pop(kind, None)
+            if kind in SETUP_INPUT_KINDS:
+                for rf in self.rosters.pop(kind, []):
+                    roster_store.delete(rf.id)
+            else:
+                self.inputs.pop(kind, None)
 
     def input_bytes(self, kind: str) -> bytes:
+        if kind in SETUP_INPUT_KINDS:
+            files = self.rosters.get(kind) or []
+            if not files:
+                raise FileNotFoundError(self._missing_message(kind))
+            return files[-1].data
         up = self.inputs.get(kind)
         if up is None:
-            home = INPUT_HOMES.get(INPUT_CADENCE.get(kind, "daily"), "the dashboard")
-            raise FileNotFoundError(
-                f"{INPUT_LABELS.get(kind, kind)} has not been uploaded yet — "
-                f"upload it from {home}."
-            )
+            raise FileNotFoundError(self._missing_message(kind))
         return up.data
+
+    @staticmethod
+    def _missing_message(kind: str) -> str:
+        home = INPUT_HOMES.get(INPUT_CADENCE.get(kind, "daily"), "the dashboard")
+        return (
+            f"{INPUT_LABELS.get(kind, kind)} has not been uploaded yet — "
+            f"upload it from {home}."
+        )
+
+    def _has_input(self, kind: str) -> bool:
+        if kind in SETUP_INPUT_KINDS:
+            return bool(self.rosters.get(kind))
+        return kind in self.inputs
 
     def missing_inputs(self, cadence: str | None = None) -> list[str]:
         """Kinds with no file yet. ``cadence`` narrows it to one group, so
@@ -167,25 +235,160 @@ class AppState:
         never set up" — two different fixes, in two different places."""
         return [
             k for k in INPUT_KINDS
-            if k not in self.inputs
+            if not self._has_input(k)
             and (cadence is None or INPUT_CADENCE.get(k) == cadence)
         ]
 
     def inputs_as_json(self) -> list[dict[str, Any]]:
         out = []
         for kind in INPUT_KINDS:
+            base = {
+                "kind": kind,
+                "label": INPUT_LABELS[kind],
+                "cadence": INPUT_CADENCE.get(kind, "daily"),
+            }
+            if kind in SETUP_INPUT_KINDS:
+                files = self.rosters.get(kind) or []
+                newest = files[-1] if files else None
+                out.append({
+                    **base,
+                    "filename": newest.filename if newest else "",
+                    "size_kb": round(len(newest.data) / 1024, 1) if newest else 0,
+                    "uploaded_at": (
+                        newest.uploaded_at.isoformat(timespec="seconds")
+                        if newest else ""
+                    ),
+                    # Newest first: the one on top is the one that wins
+                    # wherever two rosters overlap.
+                    "files": [f.as_json() for f in reversed(files)],
+                })
+                continue
             up = self.inputs.get(kind)
             if up is None:
-                out.append({
-                    "kind": kind,
-                    "label": INPUT_LABELS[kind],
-                    "cadence": INPUT_CADENCE.get(kind, "daily"),
-                    "filename": "",
-                    "size_kb": 0,
-                    "uploaded_at": "",
-                })
+                out.append({**base, "filename": "", "size_kb": 0, "uploaded_at": ""})
             else:
                 out.append(up.as_json())
+        return out
+
+    # ---------------- period rosters ----------------
+
+    def add_roster(
+        self, kind: str, filename: str, data: bytes, dates: Iterable[date_t],
+        *, persist: bool = True,
+    ) -> RosterFile:
+        """Keep an uploaded roster alongside the ones already held.
+
+        Re-uploading the same file (same name or same bytes) replaces
+        the earlier copy rather than piling up duplicates. A roster for
+        a different period is added; the rosters stay ordered by upload
+        time, and where two overlap the later upload wins.
+        """
+        if kind not in SETUP_INPUT_KINDS:
+            raise ValueError(f"{kind!r} is not a period roster")
+        digest = hashlib.sha256(data).hexdigest()
+        with self.lock:
+            kept: list[RosterFile] = []
+            for rf in self.rosters.get(kind, []):
+                same = (
+                    rf.filename == filename
+                    or hashlib.sha256(rf.data).hexdigest() == digest
+                )
+                if same:
+                    roster_store.delete(rf.id)
+                else:
+                    kept.append(rf)
+            now = datetime.now()
+            rf = RosterFile(
+                id=f"{now:%Y%m%dT%H%M%S}_{uuid.uuid4().hex[:6]}",
+                kind=kind, filename=filename, data=data,
+                dates=sorted(set(dates)), uploaded_at=now,
+            )
+            kept.append(rf)
+            self.rosters[kind] = kept
+            if persist:
+                roster_store.save(
+                    file_id=rf.id, kind=kind, filename=filename,
+                    uploaded_at=now, dates=rf.dates, data=data,
+                )
+            return rf
+
+    def remove_roster(self, kind: str, file_id: str) -> bool:
+        with self.lock:
+            files = self.rosters.get(kind, [])
+            keep = [f for f in files if f.id != file_id]
+            if len(keep) == len(files):
+                return False
+            self.rosters[kind] = keep
+            roster_store.delete(file_id)
+            return True
+
+    def load_persisted_rosters(self) -> int:
+        """Reload the rosters saved by earlier sessions. Called once at
+        server start; returns how many came back."""
+        loaded = 0
+        with self.lock:
+            for stored in roster_store.load_all():
+                if stored.kind not in SETUP_INPUT_KINDS:
+                    continue
+                self.rosters.setdefault(stored.kind, []).append(RosterFile(
+                    id=stored.id, kind=stored.kind, filename=stored.filename,
+                    data=stored.data, dates=sorted(stored.dates),
+                    uploaded_at=stored.uploaded_at,
+                ))
+                loaded += 1
+            for files in self.rosters.values():
+                files.sort(key=lambda f: f.uploaded_at)
+        return loaded
+
+    def roster_files_for(
+        self, kind: str, window: Iterable[date_t] | None = None,
+    ) -> list[RosterFile]:
+        """The stored rosters that matter for ``window`` (oldest upload
+        first, so a later upload overrides an earlier one on the merge).
+
+        Only rosters with a column in the window are returned. When none
+        has, every stored roster is returned instead: the reader then
+        loads real rows, finds no cell for the date, and the coverage
+        warning (W010 / W011) names the missing date — better than
+        silently planning with an empty roster.
+        """
+        with self.lock:
+            files = list(self.rosters.get(kind, []))
+        if not files or window is None:
+            return files
+        wanted = set(window)
+        hits = [f for f in files if wanted.intersection(f.dates)]
+        return hits or files
+
+    def roster_coverage(self, day: date_t) -> dict[str, Any]:
+        """Does each roster kind have a column for ``day`` and ``day+1``
+        (the two days the Plan stage reads)? Drives the notice in the
+        Setup sidebar so a stale roster is caught before Plan runs."""
+        next_day = day + timedelta(days=1)
+        out: dict[str, Any] = {"date": day.isoformat(), "notices": []}
+        with self.lock:
+            for kind in SETUP_INPUT_KINDS:
+                files = self.rosters.get(kind, [])
+                covered = {d for f in files for d in f.dates}
+                info = {
+                    "loaded": bool(files),
+                    "covers_date": day in covered,
+                    "covers_next_day": next_day in covered,
+                }
+                out[kind] = info
+                label = INPUT_LABELS[kind]
+                if not files:
+                    continue
+                if not info["covers_date"]:
+                    out["notices"].append(
+                        f"{label}: no roster covers {day:%d %b %Y}. "
+                        "Upload the roster for that period."
+                    )
+                elif not info["covers_next_day"]:
+                    out["notices"].append(
+                        f"{label}: the roster ends on {day:%d %b %Y}. "
+                        "Upload the next one before planning the following day."
+                    )
         return out
 
     # ---------------- overrides ----------------

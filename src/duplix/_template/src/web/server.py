@@ -144,11 +144,16 @@ def serve(
 ) -> None:
     """Run the server in the foreground. Ctrl+C exits cleanly."""
     configure_logging()
+    from ..state import STATE
+    restored = STATE.load_persisted_rosters()
+    if restored:
+        logger.info("[rosters] restored %d saved roster file(s)", restored)
     server = WebServer((host, port), Handler)
     url = f"http://{host}:{port}/"
     print(f"Flight Allocation console - {url}")
     print("  Upload today's flight schedule from the dashboard;")
-    print("  the two roster files live in the Setup sidebar.")
+    print("  the two roster files live in the Setup sidebar and are")
+    print("  remembered between runs (saved under data/rosters/).")
     print("  Ctrl+C to stop.")
     logger.debug("routes: %s", ", ".join(ROUTER.routes))
 

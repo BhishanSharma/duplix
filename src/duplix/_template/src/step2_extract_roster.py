@@ -15,12 +15,8 @@ from pathlib import Path
 from typing import cast
 
 from .config import Config, load_config
-from .io.readers import (
-    DuplicateEmployeeIdError,
-    read_am_roster,
-    read_staff_roster,
-    workbook_from_bytes,
-)
+from .io.readers import DuplicateEmployeeIdError
+from .io.roster_library import read_library
 from .schemas import (
     NON_ASSIGNABLE,
     SHIFT_CODES,
@@ -113,6 +109,7 @@ def _emit_for_window(
                 assignable=status not in NON_ASSIGNABLE,
                 current_shift=current_shift,
                 license=license_val,
+                origin_role=Role.STAFF if crew.role == Role.STAFF else Role.AM,
             ))
     return out
 
@@ -176,119 +173,116 @@ def run(
     """Read both uploaded rosters and store availability + warnings on
     ``state``. Returns a per-role count dict plus WARNINGS."""
     config: Config = load_config(config_path)
-    wb_staff = workbook_from_bytes(state.input_bytes("staff_roster"))
-    wb_am = workbook_from_bytes(state.input_bytes("am_roster"))
+    # The rosters on file cover whole periods and there can be several
+    # of them; read the ones that have a column for D / D+1 and merge.
+    window = [d_day, d_day + timedelta(days=1)]
     avail: list[AvailabilityRow] = []
     warnings: list[WarningRow] = []
     try:
-        try:
-            staff_rows = read_staff_roster(wb_staff, config)
-            am_rows = read_am_roster(wb_am, config)
-        except DuplicateEmployeeIdError as e:
-            # W020: Surface as ERROR and abort.
-            warnings = [WarningRow(
-                severity=Severity.ERROR,
-                code="W020",
-                message=str(e),
-            )]
-            _store_warnings(state, warnings, append=append_warnings)
-            return {"WARNINGS": len(warnings), "ABORTED": 1}
-        # 2026-05-27 (user direction): also check for CROSS-roster ID
-        # collisions. _check_unique_employee_ids only validates within
-        # one sheet at a time — if the same employee_id appears in
-        # BOTH Staff_Roster and AM_Roster, downstream code collapses
-        # the two rows into one decision variable in the solver. The
-        # M1/ZC entry that "doesn't get extracted" is actually
-        # silently overwritten by the same-id row from the other
-        # sheet. Abort with a clear message.
-        cross_dup_ids: list[tuple[str, str, str]] = []   # (id, staff_name, am_name)
-        staff_id_to_name = {r.employee_id: r.name for r in staff_rows}
-        for r in am_rows:
-            if r.employee_id in staff_id_to_name:
-                cross_dup_ids.append(
-                    (r.employee_id, staff_id_to_name[r.employee_id], r.name)
-                )
-        if cross_dup_ids:
-            previews = "; ".join(
-                f"id={eid!r}: Staff={sn!r}, AM={an!r}"
-                for eid, sn, an in cross_dup_ids[:5]
-            )
-            if len(cross_dup_ids) > 5:
-                previews += f", … (+{len(cross_dup_ids) - 5} more)"
-            warnings = [WarningRow(
-                severity=Severity.ERROR,
-                code="W022",
-                message=(
-                    f"{len(cross_dup_ids)} employee_id(s) appear in BOTH "
-                    f"the staff roster AND the AM roster: {previews}. Each "
-                    "staff must have a UNIQUE id across both sheets — the "
-                    "solver keys decision variables by id, so duplicates "
-                    "silently drop one of the rows (the M1/ZC entry the "
-                    "assigner expected to see often disappears this way). "
-                    "Fix the IDs in the source files, re-upload, re-run."
-                ),
-            )]
-            _store_warnings(state, warnings, append=append_warnings)
-            return {"WARNINGS": len(warnings), "ABORTED": 1}
-        # 2026-05-27 (informational): same NAME with DIFFERENT IDs
-        # across rosters is allowed (it's a real scenario — different
-        # people with the same name), but emit a WARN so the assigner
-        # knows to be careful when matching override rows by name.
-        staff_names_lower = {r.name.strip().upper(): r.employee_id for r in staff_rows}
-        same_name_diff_id: list[tuple[str, str, str]] = []  # (name, staff_id, am_id)
-        for r in am_rows:
-            key = r.name.strip().upper()
-            if key in staff_names_lower and staff_names_lower[key] != r.employee_id:
-                same_name_diff_id.append((r.name, staff_names_lower[key], r.employee_id))
-        # Also same name within Staff sheet (different IDs already
-        # caught for the same sheet by _check_unique_employee_ids on
-        # ids — but two different ids with the SAME name slip past).
-        staff_name_counts: dict[str, list[str]] = {}
-        for r in staff_rows:
-            staff_name_counts.setdefault(r.name.strip().upper(), []).append(r.employee_id)
-        dup_names_in_staff = [
-            (name, ids) for name, ids in staff_name_counts.items() if len(ids) > 1
-        ]
-        cross_warns: list[WarningRow] = []
-        if same_name_diff_id:
-            previews = "; ".join(
-                f"{nm!r} (Staff id={sid}, AM id={aid})"
-                for nm, sid, aid in same_name_diff_id[:5]
-            )
-            cross_warns.append(WarningRow(
-                severity=Severity.WARN,
-                code="W023",
-                message=(
-                    f"{len(same_name_diff_id)} name(s) appear in BOTH "
-                    f"rosters with different IDs: {previews}. Override "
-                    "rows that match by name will resolve to the AM-roster "
-                    "ID (later wins). Use IDs explicitly in overrides to "
-                    "be unambiguous."
-                ),
-            ))
-        if dup_names_in_staff:
-            previews = "; ".join(
-                f"{nm!r} (ids: {', '.join(ids)})"
-                for nm, ids in dup_names_in_staff[:5]
-            )
-            cross_warns.append(WarningRow(
-                severity=Severity.WARN,
-                code="W024",
-                message=(
-                    f"{len(dup_names_in_staff)} name(s) appear MORE THAN "
-                    f"ONCE in the staff roster with distinct IDs: {previews}. "
-                    "Override rows that match by name will resolve to "
-                    "the LAST-seen ID. Disambiguate via IDs in overrides."
-                ),
-            ))
-        avail, warnings = extract_availability(staff_rows, am_rows, d_day)
-        warnings = cross_warns + warnings
-        with state.lock:
-            state.availability = avail
+        staff_rows = read_library(state, "staff_roster", config, window)
+        am_rows = read_library(state, "am_roster", config, window)
+    except DuplicateEmployeeIdError as e:
+        # W020: Surface as ERROR and abort.
+        warnings = [WarningRow(
+            severity=Severity.ERROR,
+            code="W020",
+            message=str(e),
+        )]
         _store_warnings(state, warnings, append=append_warnings)
-    finally:
-        wb_staff.close()
-        wb_am.close()
+        return {"WARNINGS": len(warnings), "ABORTED": 1}
+    # 2026-05-27 (user direction): also check for CROSS-roster ID
+    # collisions. _check_unique_employee_ids only validates within
+    # one sheet at a time — if the same employee_id appears in
+    # BOTH Staff_Roster and AM_Roster, downstream code collapses
+    # the two rows into one decision variable in the solver. The
+    # M1/ZC entry that "doesn't get extracted" is actually
+    # silently overwritten by the same-id row from the other
+    # sheet. Abort with a clear message.
+    cross_dup_ids: list[tuple[str, str, str]] = []   # (id, staff_name, am_name)
+    staff_id_to_name = {r.employee_id: r.name for r in staff_rows}
+    for r in am_rows:
+        if r.employee_id in staff_id_to_name:
+            cross_dup_ids.append(
+                (r.employee_id, staff_id_to_name[r.employee_id], r.name)
+            )
+    if cross_dup_ids:
+        previews = "; ".join(
+            f"id={eid!r}: Staff={sn!r}, AM={an!r}"
+            for eid, sn, an in cross_dup_ids[:5]
+        )
+        if len(cross_dup_ids) > 5:
+            previews += f", … (+{len(cross_dup_ids) - 5} more)"
+        warnings = [WarningRow(
+            severity=Severity.ERROR,
+            code="W022",
+            message=(
+                f"{len(cross_dup_ids)} employee_id(s) appear in BOTH "
+                f"the staff roster AND the AM roster: {previews}. Each "
+                "staff must have a UNIQUE id across both sheets — the "
+                "solver keys decision variables by id, so duplicates "
+                "silently drop one of the rows (the M1/ZC entry the "
+                "assigner expected to see often disappears this way). "
+                "Fix the IDs in the source files, re-upload, re-run."
+            ),
+        )]
+        _store_warnings(state, warnings, append=append_warnings)
+        return {"WARNINGS": len(warnings), "ABORTED": 1}
+    # 2026-05-27 (informational): same NAME with DIFFERENT IDs
+    # across rosters is allowed (it's a real scenario — different
+    # people with the same name), but emit a WARN so the assigner
+    # knows to be careful when matching override rows by name.
+    staff_names_lower = {r.name.strip().upper(): r.employee_id for r in staff_rows}
+    same_name_diff_id: list[tuple[str, str, str]] = []  # (name, staff_id, am_id)
+    for r in am_rows:
+        key = r.name.strip().upper()
+        if key in staff_names_lower and staff_names_lower[key] != r.employee_id:
+            same_name_diff_id.append((r.name, staff_names_lower[key], r.employee_id))
+    # Also same name within Staff sheet (different IDs already
+    # caught for the same sheet by _check_unique_employee_ids on
+    # ids — but two different ids with the SAME name slip past).
+    staff_name_counts: dict[str, list[str]] = {}
+    for r in staff_rows:
+        staff_name_counts.setdefault(r.name.strip().upper(), []).append(r.employee_id)
+    dup_names_in_staff = [
+        (name, ids) for name, ids in staff_name_counts.items() if len(ids) > 1
+    ]
+    cross_warns: list[WarningRow] = []
+    if same_name_diff_id:
+        previews = "; ".join(
+            f"{nm!r} (Staff id={sid}, AM id={aid})"
+            for nm, sid, aid in same_name_diff_id[:5]
+        )
+        cross_warns.append(WarningRow(
+            severity=Severity.WARN,
+            code="W023",
+            message=(
+                f"{len(same_name_diff_id)} name(s) appear in BOTH "
+                f"rosters with different IDs: {previews}. Override "
+                "rows that match by name will resolve to the AM-roster "
+                "ID (later wins). Use IDs explicitly in overrides to "
+                "be unambiguous."
+            ),
+        ))
+    if dup_names_in_staff:
+        previews = "; ".join(
+            f"{nm!r} (ids: {', '.join(ids)})"
+            for nm, ids in dup_names_in_staff[:5]
+        )
+        cross_warns.append(WarningRow(
+            severity=Severity.WARN,
+            code="W024",
+            message=(
+                f"{len(dup_names_in_staff)} name(s) appear MORE THAN "
+                f"ONCE in the staff roster with distinct IDs: {previews}. "
+                "Override rows that match by name will resolve to "
+                "the LAST-seen ID. Disambiguate via IDs in overrides."
+            ),
+        ))
+    avail, warnings = extract_availability(staff_rows, am_rows, d_day)
+    warnings = cross_warns + warnings
+    with state.lock:
+        state.availability = avail
+    _store_warnings(state, warnings, append=append_warnings)
 
     # Re-apply the staged drawer mutations AFTER availability has been
     # rebuilt from the raw rosters. Without this, every Plan wipes the

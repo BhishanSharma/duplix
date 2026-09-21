@@ -44,7 +44,50 @@ function uploadedAt(iso) {
   return (iso.split("T")[1] || "").slice(0, 5);
 }
 
+/** "31 Aug – 27 Sep 2026" from two ISO dates. */
+function rangeLabel(startIso, endIso) {
+  if (!startIso || !endIso) return "no dates found";
+  const fmt = (iso, withYear) => {
+    const [y, m, d] = iso.split("-").map(Number);
+    const mon = new Date(y, m - 1, d).toLocaleString("en-GB", { month: "short" });
+    return `${d} ${mon}${withYear ? " " + y : ""}`;
+  };
+  return `${fmt(startIso, false)} – ${fmt(endIso, true)}`;
+}
+
+/** A period roster slot: every stored roster with the dates it covers.
+ *  Newest first — that is the one that wins where two overlap. */
+function rosterSlotHtml(item) {
+  const files = item.files || [];
+  const kind = escapeHTML(item.kind);
+  const rows = files.map((f) => `
+    <li class="roster-file" data-file-id="${escapeHTML(f.id)}">
+      <div class="roster-file-main">
+        <span class="roster-file-range">${escapeHTML(rangeLabel(f.start, f.end))}</span>
+        <span class="subdued">${escapeHTML(f.filename)} · ${f.days} days · added ${escapeHTML(f.uploaded_at.slice(0, 10))}</span>
+      </div>
+      <button class="ghost btn-remove-roster" type="button"
+              data-kind="${kind}" data-file-id="${escapeHTML(f.id)}">Remove</button>
+    </li>`).join("");
+  return `
+    <div class="input-slot roster-slot ${files.length ? "loaded" : "empty"}" data-kind="${kind}">
+      <div class="input-slot-main">
+        <div class="input-slot-label">${escapeHTML(item.label)}</div>
+        ${files.length
+          ? `<ul class="roster-file-list">${rows}</ul>`
+          : `<div class="input-slot-file"><span class="subdued">no roster yet</span></div>`}
+      </div>
+      <div class="input-slot-actions">
+        <label class="file-btn">
+          ${files.length ? "Add roster" : "Choose file"}
+          <input type="file" accept=".xlsx" data-kind="${kind}" hidden>
+        </label>
+      </div>
+    </div>`;
+}
+
 function slotHtml(item) {
+  if (item.cadence === "setup") return rosterSlotHtml(item);
   const loaded = !!item.filename;
   const kind = escapeHTML(item.kind);
   const detail = loaded
@@ -136,6 +179,16 @@ async function clearOne(kind) {
   await load();
 }
 
+async function removeRoster(kind, fileId) {
+  try {
+    await del(`/api/inputs/${kind}/${encodeURIComponent(fileId)}`);
+  } catch (e) {
+    alert(`Remove failed: ${e.message}`);
+    return;
+  }
+  await load();
+}
+
 /** Wire one container's slots. Delegated, so a repaint keeps working. */
 export function bindMount(selector) {
   const host = $(selector);
@@ -152,5 +205,7 @@ export function bindMount(selector) {
   host.addEventListener("click", (ev) => {
     const btn = ev.target.closest(".btn-clear-input");
     if (btn) clearOne(btn.dataset.kind);
+    const one = ev.target.closest(".btn-remove-roster");
+    if (one) removeRoster(one.dataset.kind, one.dataset.fileId);
   });
 }

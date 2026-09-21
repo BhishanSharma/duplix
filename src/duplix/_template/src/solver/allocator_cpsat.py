@@ -41,6 +41,7 @@ from ortools.sat.python import cp_model
 
 from ..allocator.caps import hard_cap_for, preferred_target_for
 from ..allocator.eligibility import EligibilityContext, p2f_partial_block_anchors
+from ..allocator.p2f_priority import select_p2f_priority
 from ..allocator.windows import (
     HANDOVER_WINDOW_MIN,
     P2F_WINDOW_HALF_MIN,
@@ -147,6 +148,30 @@ S7_WEIGHT_ZC_BUFFER = 15
 # wins — i.e., better to use the outer band than leave a flight
 # unallocated.
 S_OUTER_BAND_PENALTY = 5_000
+
+# ZC workload floor (2026-09-22 fix, second pass).
+# H18 used to enforce band["min"] (e.g. N/ZC = 14) as a HARD per-staff
+# floor. That's fine when the day's flight supply can support it, but
+# a static config number has no idea whether it's actually achievable
+# — a zero-night-ops day (or any day where H10 spacing eats into the
+# raw eligible count) can make band_lo mathematically impossible,
+# which drags the ENTIRE model to INFEASIBLE, not just that bucket.
+# This happened in production 2026-09-22 (Night ops = 0, N/ZC floor
+# forced to 14 -> 2117/2117 flights unallocated).
+#
+# Fix: make it a SOFT shortfall penalty instead of a hard constraint.
+# Weight is high — just under S_OUTER — so the solver still fights
+# hard to reach the floor whenever it's reachable, but a genuinely
+# unreachable floor costs points instead of blowing up the solve.
+ZC_FLOOR_SHORTFALL_WEIGHT = 4_000
+
+# P2F priority (2026-09-22, user direction): a P2F flight is worth 10x an
+# ordinary flight when it is left unallocated, so whenever a handler's
+# cap / spacing forces a choice, the normal flight is the one that moves
+# to someone else. Normal flights stay at 100_000 (``unassigned_penalty``
+# in ``solve_allocation``). P2F flights that ``select_p2f_priority`` can
+# reserve are fixed outright; this weight covers the rest.
+P2F_UNASSIGNED_PENALTY = 1_000_000
 
 # Phase 4 (2026-05-14, INTL overhaul, Change 5) — INTL spacing policy.
 # Hard floor: same-handler INTL DEP→INTL DEP pairs with gap < 15 min
@@ -770,6 +795,7 @@ def solve_allocation(
     # the whole problem becoming infeasible. The objective rewards
     # assignment via _UNASSIGNED_PENALTY below.
     unassigned_indicators: list[Any] = []
+    p2f_unassigned_indicators: list[Any] = []
     for flight in flights:
         eligible_ids = eligibility.get(flight.unique_id, set())
         present = [
@@ -788,7 +814,13 @@ def solve_allocation(
             # 0 otherwise. We sum these into the objective.
             ind = model.new_bool_var(f"unassigned_{flight.unique_id}")
             model.add(ind == 1 - sum(present))
-            unassigned_indicators.append(ind)
+            # P2F flights carry a heavier penalty (see
+            # P2F_UNASSIGNED_PENALTY) so they win any tie against a
+            # normal flight for the handler's cap / spacing.
+            if flight.ops_class == OpsClass.P2F:
+                p2f_unassigned_indicators.append(ind)
+            else:
+                unassigned_indicators.append(ind)
 
     # ---- H10: per-staff same-flight spacing, band-aware + waiver-aware ----
     # Replaces the prior model.add_no_overlap formulation. For every pair
@@ -925,10 +957,26 @@ def solve_allocation(
                         if (f.unique_id, s.employee_id) in x
                     ]
                     if my_vars:
-                        model.add(sum(my_vars) >= band["min"])
+                        # 2026-09-22 fix (2nd pass): SOFT floor, not
+                        # hard. A hard `model.add(sum >= band["min"])`
+                        # can make the WHOLE model INFEASIBLE whenever
+                        # the day's supply (or H10 spacing exclusions
+                        # among ``my_vars``) can't actually reach
+                        # band["min"] — a raw eligible-flight count
+                        # isn't proof that count is simultaneously
+                        # selectable. Shortfall costs points instead.
+                        shortfall = model.new_int_var(
+                            0, band["min"],
+                            f"zc_floor_short_{s.employee_id}",
+                        )
+                        model.add(shortfall >= band["min"] - sum(my_vars))
+                        spread_obj_terms.append(
+                            ZC_FLOOR_SHORTFALL_WEIGHT * shortfall
+                        )
                         print(
-                            f"  H18 single-ZC floor: {shift_code}/{role.value} "
-                            f"({s.name}) actual >= {band['min']}"
+                            f"  H18 single-ZC soft floor: "
+                            f"{shift_code}/{role.value} ({s.name}) "
+                            f"target >= {band['min']} (soft)"
                         )
             continue
         sample_staff = bucket[0]
@@ -957,16 +1005,23 @@ def solve_allocation(
         if role == Role.ZC:
             from ..allocator.caps import get_band
             band = get_band(shift_code, role)
-            lo = band["min"] if band else 0
+            band_lo = band["min"] if band else 0
         else:
-            lo = 0
+            band_lo = 0
         # bucket_min / bucket_max IntVars track the bucket's distribution
         # and feed the soft S1b spread-min penalty added to objective.
+        # 2026-09-22 fix: domain floor is always 0 here, NOT band_lo.
+        # band_lo is enforced per-staff below, clamped to that staff's
+        # own eligible-flight supply — if the IntVar's own domain
+        # floor were band_lo, a supply-starved staff (actual_expr forced
+        # below band_lo) would still be constrained via
+        # ``actual_expr >= bucket_min >= band_lo``, silently
+        # reintroducing the same infeasibility this fix removes.
         bucket_min = model.new_int_var(
-            lo, hi, f"bmin_{shift_code}_{role.value}",
+            0, hi, f"bmin_{shift_code}_{role.value}",
         )
         bucket_max = model.new_int_var(
-            lo, hi, f"bmax_{shift_code}_{role.value}",
+            0, hi, f"bmax_{shift_code}_{role.value}",
         )
         n_constrained = 0
         for s in bucket:
@@ -977,19 +1032,33 @@ def solve_allocation(
             if not emp_vars:
                 continue
             actual_expr = sum(emp_vars)
-            model.add(actual_expr >= lo)
             model.add(actual_expr <= hi)
             model.add(actual_expr >= bucket_min)
             model.add(actual_expr <= bucket_max)
+            if band_lo > 0:
+                # 2026-09-22 fix (2nd pass): SOFT floor, not hard. See
+                # ZC_FLOOR_SHORTFALL_WEIGHT comment — a hard floor here
+                # is what caused the 2026-09-22 all-flights-unallocated
+                # incident (Night ops = 0, N/ZC floor = 14 -> INFEASIBLE).
+                # shortfall = max(0, band_lo - actual_expr); penalized,
+                # never blocks the solve.
+                shortfall = model.new_int_var(
+                    0, band_lo, f"zc_floor_short_{s.employee_id}",
+                )
+                model.add(shortfall >= band_lo - actual_expr)
+                spread_obj_terms.append(
+                    ZC_FLOOR_SHORTFALL_WEIGHT * shortfall
+                )
             n_constrained += 1
         if n_constrained >= 2:
             spread_obj_terms.append(
                 S1B_WEIGHT_BUCKET_SPREAD * (bucket_max - bucket_min)
             )
         n_h18_buckets += 1
+        floor_note = f" (soft floor={band_lo})" if band_lo > 0 else ""
         print(f"  H18 spread bucket {shift_code}/{role.value}: "
               f"{len(bucket)} staff ({n_constrained} pinned), "
-              f"target={target}, range=[{lo}, {hi}]")
+              f"target={target}, range=[0, {hi}]{floor_note}")
     print(f"  H18 total buckets pinned: {n_h18_buckets}")
 
     # ---- H19 removed 2026-05-11 ----
@@ -1053,6 +1122,43 @@ def solve_allocation(
     if elig_ctx is not None:
         _add_p2f_partial_block_constraints(model, flights, x, elig_ctx)
 
+    # ---- P2F first: reserve each handler's P2F flights ----
+    # 2026-09-22 (user direction): the nominated P2F handler must get his
+    # P2F flights BEFORE any normal flight is considered. Previously a P2F
+    # flight was just another flight with the same unallocated cost, so a
+    # handler could be filled with normal flights (cap H16 / spacing H10)
+    # and have P2F left over. ``select_p2f_priority`` returns only the
+    # P2F flights that can be fixed without conflicting with H17 / H16 /
+    # H10 / existing pins, so this cannot make the model infeasible.
+    # Normal flights are then solved around them; any P2F flight not
+    # reserved still gets the heavier P2F_UNASSIGNED_PENALTY above.
+    if elig_ctx is not None and elig_ctx.p2f_handler_by_shift:
+        reserved_p2f, skipped_p2f = select_p2f_priority(
+            flights,
+            eligibility,
+            set(elig_ctx.p2f_handler_by_shift.values()),
+            ops_day=ops_day,
+            cap_by_staff={
+                eid: hard_cap_for(s) for eid, s in staff_by_id.items()
+            },
+            pinned_assignments=pinned_assignments,
+            waive_h10_triples=waive_h10_triples,
+        )
+        n_p2f_reserved = 0
+        for _uid, _eid in reserved_p2f.items():
+            _var = x.get((_uid, _eid))
+            if _var is None:
+                continue
+            model.add(_var == 1)
+            n_p2f_reserved += 1
+        if n_p2f_reserved or skipped_p2f:
+            print(
+                f"  P2F-first: {n_p2f_reserved} P2F flight(s) reserved for "
+                f"their handlers; {len(skipped_p2f)} left to the solver"
+            )
+            for _uid, _why in skipped_p2f:
+                print(f"    P2F {_uid} not reserved: {_why}")
+
     # ---- Soft objectives ----
     # Unassigned-flight penalty dominates everything else, so the solver
     # always prefers to allocate over leaving idle. Weight = 100_000 so a
@@ -1062,6 +1168,10 @@ def solve_allocation(
     obj_terms: list[Any] = []
     if unassigned_indicators:
         obj_terms.append(unassigned_penalty * sum(unassigned_indicators))
+    if p2f_unassigned_indicators:
+        obj_terms.append(
+            P2F_UNASSIGNED_PENALTY * sum(p2f_unassigned_indicators)
+        )
     # S1b bucket spread minimization — wired alongside S1 count balance.
     # Always on when S1 is enabled (they're complementary: S1 pins each
     # staff near their preferred target, S1b pushes the whole bucket toward

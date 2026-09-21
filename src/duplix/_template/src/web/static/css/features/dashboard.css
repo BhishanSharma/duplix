@@ -44,6 +44,14 @@
   border: 1px solid #28a745; color: #155724; font-size: 12px;
 }
 .zc-selected-badge b { font-size: 10px; margin-left: 3px; }
+.zc-selected-badge small { font-size: 10px; margin-left: 3px; }
+.zc-badge-muted { background: transparent; border-color: var(--line); color: var(--subdued); }
+.zc-remove {
+  margin-left: 4px; padding: 0 3px; border: 0; background: transparent;
+  color: inherit; font: inherit; font-size: 14px; line-height: 1; cursor: pointer;
+}
+.zc-remove:hover { color: #b02a37; }
+.zc-note { margin: 0 0 8px; line-height: 1.4; }
 .zc-scroll-list { max-height: 245px; overflow-y: auto; padding-right: 3px; }
 .zc-list-section + .zc-list-section { margin-top: 12px; }
 .zc-list-section h3 {

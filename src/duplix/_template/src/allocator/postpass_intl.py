@@ -25,7 +25,8 @@ The hard `<15 min` same-handler INTL DEP→INTL DEP constraint lives in
 the solver (Change 5, Phase 4 pending). This post-pass takes whatever
 the solver produced and applies the buffer rule.
 
-See ``docs/intl_overhaul_2026-05-14.md`` for the full design.
+Design notes lived in ``docs/intl_overhaul_2026-05-14.md`` (not included in
+this repository snapshot).
 """
 
 from __future__ import annotations

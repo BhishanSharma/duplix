@@ -15,6 +15,10 @@ Apply rules:
                   (same semantics as type=sick).
   change_role   → rewrite the staff's role, and their status when the
                   new role is ZC.
+  ZC list       → everyone on the saved Zone Controller list for D
+                  (``zc_store``, picked on the dashboard) is promoted to
+                  ZC, and anyone removed there is taken off ZC — even if
+                  the roster cell still says ``/ZC``.
 
 Every call re-applies ALL staged rows from scratch, which is why each
 applier is written to be a no-op when its effect is already present.
@@ -27,7 +31,9 @@ from datetime import date as date_t
 from datetime import time as time_t
 from typing import Any
 
+from . import zc_store
 from .schemas import (
+    STATUS_IS_ZC,
     AvailabilityRow,
     CleanFlightRow,
     CrewStatus,
@@ -95,6 +101,7 @@ def apply_staged_overrides(state: AppState, d_day: date_t) -> dict[str, int]:
         OverrideType.ADD_STAFF.value:     0,
         OverrideType.REMOVE_STAFF.value:  0,
         OverrideType.CHANGE_ROLE.value:   0,
+        "zc_list":                        0,
     }
     with state.lock:
         for row in list(state.overrides):
@@ -116,6 +123,10 @@ def apply_staged_overrides(state: AppState, d_day: date_t) -> dict[str, int]:
             elif tp == OverrideType.CHANGE_ROLE.value:
                 if _apply_change_role(state, row, d_day):
                     counts[tp] += 1
+        # The dashboard's ZC list goes last, so an explicit change_role
+        # row (e.g. ZC -> AM for someone who is unwell) is applied first
+        # and the list only promotes people still in the live pool.
+        counts["zc_list"] = _apply_zc_list(state, d_day)
     return counts
 
 
@@ -301,15 +312,103 @@ def _apply_change_role(state: AppState, row: Mapping[str, Any], d_day: date_t) -
         if _normalize_name(av.name) != target or av.date.isoformat() != d_iso:
             continue
         update: dict[str, Any] = {"role": new_role}
-        if new_role is Role.ZC and av.current_shift in ("M", "A", "N", "M1", "A1"):
-            zc_literal = f"{av.current_shift}/ZC"
-            try:
-                update["status"] = CrewStatus(zc_literal)
-                update["raw_status"] = zc_literal
-            except ValueError:
-                pass
+        if new_role is Role.ZC:
+            update = _zc_update(av)
         elif new_role is Role.AM:
             update["assignable"] = False
         state.availability[i] = av.model_copy(update=update)
         found = True
     return found
+
+
+# ---------------- Zone Controller list ----------------
+
+# A P2F handler who is made ZC keeps the handler duty: M/P2F -> M/P2F/ZC.
+# (Rewriting it to plain M/ZC would drop them from the P2F auto-pick.)
+_P2F_TO_ZC_P2F: dict[CrewStatus, CrewStatus] = {
+    CrewStatus.P2F_M: CrewStatus.ZC_P2F_M,
+    CrewStatus.P2F_A: CrewStatus.ZC_P2F_A,
+    CrewStatus.P2F_N: CrewStatus.ZC_P2F_N,
+}
+
+
+def _zc_update(av: AvailabilityRow) -> dict[str, Any]:
+    """The field changes that make ``av`` a Zone Controller for the day:
+    role ZC plus the matching ``<shift>/ZC`` status, so every downstream
+    reader (dashboard, step3, auto-P2F picker) sees a ZC-flagged row."""
+    update: dict[str, Any] = {"role": Role.ZC}
+    if av.status in STATUS_IS_ZC:
+        return update
+    target = _P2F_TO_ZC_P2F.get(av.status)
+    if target is None and av.current_shift in ("M", "A", "N", "M1", "A1"):
+        try:
+            target = CrewStatus(f"{av.current_shift}/ZC")
+        except ValueError:
+            target = None
+    if target is not None:
+        update["status"] = target
+        update["raw_status"] = target.value
+    return update
+
+
+def _demote_update(av: AvailabilityRow) -> dict[str, Any]:
+    """Undo a ZC promotion: back to the roster the person came from
+    (STAFF / AM) and to the plain shift or P2F-handler status without
+    the ``/ZC`` (M/ZC -> M, M/P2F/ZC -> M/P2F)."""
+    update: dict[str, Any] = {"role": av.origin_role or Role.STAFF}
+    lit = av.status.value
+    if lit.endswith("/ZC"):
+        lit = lit[: -len("/ZC")]
+        target: CrewStatus | None = None
+        try:
+            target = CrewStatus(lit)
+        except ValueError:
+            # e.g. M1/P2F has no status of its own: keep just the shift.
+            if lit.endswith("/P2F"):
+                try:
+                    target = CrewStatus(lit[: -len("/P2F")])
+                except ValueError:
+                    target = None
+        if target is not None:
+            update["status"] = target
+            update["raw_status"] = target.value
+    return update
+
+
+def _apply_zc_list(state: AppState, d_day: date_t) -> int:
+    """Make D's Zone Controllers match the dashboard's list. Returns how
+    many rows on D are ZC because of the list.
+
+    * Everyone on the saved list who is rostered on a shift and
+      assignable on D is promoted. A name carried over from yesterday who
+      is off today is simply skipped, not an error.
+    * Everyone recorded as *removed* for D is taken back off ZC — this is
+      how a ``/ZC`` that is still in the roster file gets overridden.
+
+    Idempotent, like every applier here.
+    """
+    names, _source, _ = zc_store.effective(d_day)
+    removed = {_normalize_name(n) for n in zc_store.removed(d_day)}
+    d_iso = d_day.isoformat()
+    if not any(av.date.isoformat() == d_iso for av in state.availability):
+        return 0
+    # The list this plan actually runs with becomes that day's own list,
+    # so tomorrow's carry-over starts from it.
+    zc_store.freeze(d_day)
+    wanted = {_normalize_name(n) for n in names} - removed
+    applied = 0
+    for i, av in enumerate(state.availability):
+        if av.date.isoformat() != d_iso:
+            continue
+        key = _normalize_name(av.name)
+        if key in removed:
+            if av.role is Role.ZC or av.status in STATUS_IS_ZC:
+                state.availability[i] = av.model_copy(update=_demote_update(av))
+            continue
+        if key not in wanted:
+            continue
+        if not av.assignable or not av.current_shift:
+            continue
+        state.availability[i] = av.model_copy(update=_zc_update(av))
+        applied += 1
+    return applied

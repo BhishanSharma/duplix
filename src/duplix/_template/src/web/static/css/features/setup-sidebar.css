@@ -40,3 +40,38 @@
   grid-template-columns: 1fr;
 }
 
+
+/* ---- stored period rosters: one row per file, with its date range ---- */
+.roster-slot { align-items: flex-start; }
+.roster-file-list {
+  list-style: none;
+  margin: 6px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.roster-file {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.roster-file-main {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.roster-file-range { font-weight: 600; }
+.roster-coverage {
+  padding: 8px 10px;
+  border-left: 3px solid var(--warn);
+  background: var(--warn-bg);
+  border-radius: var(--radius);
+  font-size: 12px;
+  color: var(--warn);
+}
+.roster-coverage p { margin: 0; }
+.roster-coverage p + p { margin-top: 4px; }

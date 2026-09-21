@@ -95,7 +95,8 @@ def read_sv_portal_columns(state: AppState) -> dict[str, Any]:
         return {"headers": [], "samples": {}}
     try:
         wb = workbook_from_bytes(data)
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001 — degrade to free-text input
+        print(f"  sv_portal headers unreadable: {type(exc).__name__}: {exc}")
         return {"headers": [], "samples": {}}
     try:
         if not wb.sheetnames:

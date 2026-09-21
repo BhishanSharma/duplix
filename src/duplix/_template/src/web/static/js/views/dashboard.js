@@ -93,7 +93,7 @@ export const template = `
       </div>
       <aside class="ds-chart-cell zc-selector" aria-labelledby="zc-selector-title">
         <h2 id="zc-selector-title">Zone Controllers</h2>
-        <p class="subdued">Search the AM List or Staff list to assign a Zone Controller.</p>
+        <p class="subdued">Search the AM List and Staff together to pick the day's Zone Controllers. The list is saved and carries over to the next day.</p>
         <input id="zc-selector-search" type="search" placeholder="Search person" aria-label="Search AM List and Staff">
         <div id="zc-selector-list"></div>
       </aside>
@@ -218,7 +218,7 @@ export async function renderCharts() {
   shiftSummary.render(wlRows, allocRows, byStaff);
   flightTrend.render(allocRows, dDay, wlRows);
   rosterChart.render(names);
-  zcSelector.render();
+  await zcSelector.load();
 }
 
 export function init(deps) {

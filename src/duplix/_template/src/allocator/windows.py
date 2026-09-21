@@ -293,8 +293,12 @@ def is_in_tail_ext(
     to the prev-shift handler), but the next shift's paired person does
     the post-airborne (D+20) work and is recorded as RELIEVED_BY.
     Flights at or before nominal end are NOT relieved (the prev staff
-    handles their own D+20 within shift). N has no tail extension —
-    nominal end == tail end, so this returns False for any N flight.
+    handles their own D+20 within shift).
+
+    Note: the uniform 30-min handover window is applied to N as well, so
+    05:01-05:30 on D+1 return True for N. Earlier comments claimed N has
+    no tail extension; postsolve is unaffected because it has no relief
+    shift for N. Behaviour is pinned in tests/test_windows.py.
     """
     minutes = std_to_ops_day_minutes(std, flight_date, ops_day)
     nominal_end = SHIFT_NOMINAL_MIN[shift][1]

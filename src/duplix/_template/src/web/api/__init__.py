@@ -6,6 +6,7 @@
     override_rows   the drawer's rows and staged add/remove forms
     recommender     turn a suggested fix into an override row
     settings        shift bands, airport codes, extraction filters
+    zc              the per-date Zone Controller list
     export          the .xlsx download
     pages           index.html and the static/ tree
 
@@ -26,6 +27,7 @@ from . import (
     recommender,
     runs,
     settings,
+    zc,
 )
 
 #: Registered in order. Literal routes are a dict lookup, so order only
@@ -37,6 +39,7 @@ BLUEPRINTS = (
     override_rows,
     recommender,
     settings,
+    zc,
     export,
     pages,
 )

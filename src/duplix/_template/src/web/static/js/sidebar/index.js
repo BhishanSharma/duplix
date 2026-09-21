@@ -13,7 +13,9 @@
  */
 
 import { $ } from "../core/dom.js";
+import { getOr } from "../core/api.js";
 import * as slots from "../panels/input-slots.js";
+import * as dateControl from "../panels/date-control.js";
 
 /** The kinds this sidebar owns, in the order they're shown. */
 const KINDS = ["staff_roster", "am_roster"];
@@ -33,15 +35,17 @@ export const template = `
           <span id="setup-status" class="inputs-status warn">—</span>
         </div>
         <p class="subdued small">
-          Set these once. Both rosters cover a whole period, so they only
-          need replacing when a new one is published — not with every
-          day's allocation.
+          Upload each roster when it is published (about once a month).
+          They are saved and remembered between runs, and the roster that
+          covers the allocation date is picked automatically — a new
+          period is simply added alongside the old one.
         </p>
+        <div id="setup-coverage" class="roster-coverage" hidden></div>
         <div id="setup-inputs-list" class="inputs-list inputs-list-stacked"></div>
         <p class="subdued small">
-          Held in the server's memory for this session. Nothing is written
-          back to the files. After replacing one, re-run Plan so the
-          allocation picks up the new roster.
+          Saved on this computer under <code>data/rosters/</code>. Nothing
+          is written back to your files. After adding a roster, re-run
+          Plan so the allocation picks it up.
         </p>
       </section>
 
@@ -69,13 +73,29 @@ export async function open() {
   await slots.load();
 }
 
+/** Say so when the allocation date (or the day after it) has no roster
+ *  column — the case that used to surface only as an empty plan. */
+async function renderCoverage() {
+  const box = $("#setup-coverage");
+  if (!box) return;
+  const day = dateControl.value();
+  const cov = await getOr(
+    `/api/rosters/coverage${day ? `?date=${encodeURIComponent(day)}` : ""}`,
+    null, "rosterCoverage",
+  );
+  const notices = (cov && cov.notices) || [];
+  box.hidden = notices.length === 0;
+  box.innerHTML = notices.map((n) => `<p>${n.replace(/</g, "&lt;")}</p>`).join("");
+}
+
 /** Render the sidebar's roster-status banner. */
 function renderStatus() {
+  renderCoverage();
   const missing = slots.groupMissingCount("setup");
   const banner = $("#setup-status");
   if (banner) {
     banner.textContent = missing === 0
-      ? "Both rosters loaded ✓"
+      ? "Both rosters saved ✓"
       : missing === 1 ? "1 roster missing" : `${missing} rosters missing`;
     banner.className = "inputs-status " + (missing === 0 ? "ok" : "warn");
   }
