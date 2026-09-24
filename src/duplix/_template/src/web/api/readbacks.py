@@ -29,6 +29,7 @@ STATE_READBACKS = {
     "/api/handlers":           readback.read_handlers,
     "/api/staffing":           readback.read_staffing,
     "/api/staff_names":        readback.read_staff_names,
+    "/api/roster_full":        readback.read_roster_full,
     "/api/sv_portal/columns":  readback.read_sv_portal_columns,
 }
 

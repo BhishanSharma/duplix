@@ -6,11 +6,24 @@
 
 .ds-chart-pair {
   display: grid;
-  grid-template-columns: minmax(0, 1.15fr) minmax(320px, 0.85fr) minmax(260px, 0.6fr);
+  /* Fifteen tracks let the control row be equal thirds (5/5/5) while
+     the chart row below remains a true 60/40 split (9/6). */
+  grid-template-columns: repeat(15, minmax(0, 1fr));
   gap: 18px;
-  align-items: stretch;
+  align-items: start;
   margin-bottom: 28px;
 }
+
+.ds-chart-pair > :nth-child(1) { grid-column: 1 / 10; grid-row: 2; }
+.ds-chart-pair > :nth-child(2) { grid-column: 10 / -1; grid-row: 2; }
+.ds-side-panels { display: contents; }
+/* The parent grid uses align-items: start (so the two charts below
+   keep their own natural height); these three panels opt back into
+   stretching to the row's tallest, so all three read as one even row
+   regardless of how many badges / rows each one's content has. */
+.zc-selector { grid-column: 1 / 6; grid-row: 1; align-self: stretch; }
+.roster-edit { grid-column: 6 / 11; grid-row: 1; align-self: stretch; }
+.handler-assign { grid-column: 11 / -1; grid-row: 1; align-self: stretch; }
 
 .ds-chart-cell {
   min-width: 0;
@@ -19,6 +32,7 @@
   border-radius: 10px;
   background: var(--bg-elev);
   box-sizing: border-box;
+  align-self: stretch;
 }
 
 .ds-chart-cell h2 {
@@ -33,6 +47,8 @@
 }
 
 .zc-selector { display: flex; flex-direction: column; }
+.roster-edit { display: flex; flex-direction: column; }
+.handler-assign { display: flex; flex-direction: column; }
 #zc-selector-search {
   width: 100%; box-sizing: border-box; padding: 8px 10px;
   border: 1px solid var(--line); border-radius: var(--radius); font: inherit;
@@ -65,6 +81,103 @@
 }
 .zc-person:hover { background: var(--hover); }
 .zc-person small { color: var(--subdued); white-space: nowrap; }
+
+/* Roster Change pane */
+#roster-edit-search {
+  width: 100%; box-sizing: border-box; padding: 8px 10px;
+  border: 1px solid var(--line); border-radius: var(--radius); font: inherit;
+}
+#roster-edit-list { margin-top: 12px; min-height: 0; }
+.roster-edit-note { margin: 0 0 10px; line-height: 1.4; }
+.roster-edit-scroll-list { max-height: 375px; overflow-y: auto; padding-right: 3px; }
+.roster-edit-row {
+  display: flex; align-items: center; gap: 8px;
+  padding: 6px 4px; border-bottom: 1px solid var(--line);
+}
+.roster-edit-row:last-child { border-bottom: 0; }
+.roster-edit-who {
+  flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 1px;
+}
+.roster-edit-name {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.roster-edit-status { color: var(--subdued); white-space: nowrap; }
+.roster-edit-warn { cursor: help; }
+.roster-edit-select {
+  flex: 0 0 auto; padding: 4px 6px; border: 1px solid var(--line);
+  border-radius: var(--radius); font: inherit; background: var(--bg-elev);
+}
+.roster-edit-apply {
+  flex: 0 0 auto; padding: 5px 10px; border: 1px solid var(--line);
+  border-radius: var(--radius); background: transparent; color: var(--text);
+  font: inherit; cursor: pointer;
+}
+.roster-edit-apply:hover { background: var(--hover); }
+
+/* Handler Assign pane (P2F / NORSE nominations) */
+#handler-assign-search {
+  width: 100%; box-sizing: border-box; padding: 8px 10px;
+  border: 1px solid var(--line); border-radius: var(--radius); font: inherit;
+}
+#handler-assign-list { margin-top: 12px; min-height: 0; }
+.handler-assign-note { margin: 0 0 10px; line-height: 1.4; }
+.handler-assign-scroll-list { max-height: 375px; overflow-y: auto; padding-right: 3px; }
+.handler-assign-row {
+  display: flex; align-items: center; gap: 8px;
+  padding: 6px 4px; border-bottom: 1px solid var(--line);
+}
+.handler-assign-row:last-child { border-bottom: 0; }
+.handler-assign-who {
+  flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 1px;
+}
+.handler-assign-name {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.handler-assign-status { color: var(--subdued); white-space: nowrap; }
+.handler-assign-select {
+  flex: 0 0 auto; padding: 4px 6px; border: 1px solid var(--line);
+  border-radius: var(--radius); font: inherit; background: var(--bg-elev);
+}
+.handler-assign-apply {
+  flex: 0 0 auto; padding: 5px 10px; border: 1px solid var(--line);
+  border-radius: var(--radius); background: transparent; color: var(--text);
+  font: inherit; cursor: pointer;
+}
+.handler-assign-apply:hover { background: var(--hover); }
+
+/* Search suggestions (Zone Controllers / Roster Change / Handler
+   Assign) — a Google-style dropdown of name matches under the input. */
+.autocomplete-wrap { position: relative; }
+.autocomplete-list {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  right: 0;
+  z-index: 5;
+  margin: 4px 0 0;
+  padding: 4px;
+  list-style: none;
+  background: var(--bg-elev);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  max-height: 260px;
+  overflow-y: auto;
+}
+.autocomplete-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 7px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.autocomplete-item span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.autocomplete-item small { color: var(--subdued); white-space: nowrap; flex: 0 0 auto; }
+.autocomplete-item:hover,
+.autocomplete-item.active { background: var(--hover); }
+.autocomplete-item strong { font-weight: 700; }
 
 /* Workload distribution chart */
 #ds-workload-dist {
@@ -125,15 +238,22 @@
 /* Medium screens */
 @media (max-width: 1100px) {
   .ds-chart-pair {
-    grid-template-columns: minmax(0, 1fr) minmax(280px, 0.85fr);
+    grid-template-columns: repeat(10, minmax(0, 1fr));
     gap: 14px;
   }
+
+  .ds-chart-pair > :nth-child(1) { grid-column: 1 / 7; }
+  .ds-chart-pair > :nth-child(2) { grid-column: 7 / -1; }
+  .zc-selector { grid-column: 1 / 6; }
+  .roster-edit { grid-column: 6 / -1; }
+  .handler-assign { grid-column: 1 / -1; grid-row: 2; }
+  .ds-chart-pair > :nth-child(1),
+  .ds-chart-pair > :nth-child(2) { grid-row: 3; }
 
   .ds-chart-cell {
     padding: 16px;
   }
 
-  .zc-selector { grid-column: 1 / -1; }
 }
 
 /* Tablet */
@@ -141,6 +261,15 @@
   .ds-chart-pair {
     grid-template-columns: 1fr;
     gap: 14px;
+  }
+
+  .ds-chart-pair > :nth-child(1),
+  .ds-chart-pair > :nth-child(2),
+  .zc-selector,
+  .roster-edit,
+  .handler-assign {
+    grid-column: 1;
+    grid-row: auto;
   }
 
   #ds-flights-pie {

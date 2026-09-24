@@ -98,6 +98,18 @@ S1_WEIGHT_BELOW_TIER3_BOOST = 500
 # Dominates S1 marginal costs (e.g. 22+24 = 50+550 = 600 + spread=2 1200 = 1800
 # vs 23+23 = 50+50 = 100 + spread=0 = 100 — 18x preference for tight).
 S1B_WEIGHT_BUCKET_SPREAD = 600
+# 2026-09-23 fix: escalating boost once the same-bucket spread exceeds
+# 1 flight. The base S1B_WEIGHT_BUCKET_SPREAD alone let a 3-flight gap
+# (e.g. 20 vs 23 on the same shift/role) survive whenever it was
+# merely the CHEAPEST tie-break rather than something actually forced
+# by H10 spacing / eligibility — 600/unit isn't always enough to beat
+# out other soft terms once a few flights' worth of slack exists.
+# This tier only bites on the spread beyond 1, so it costs nothing
+# extra for the spread=0/1 cases the base term already prefers, and it
+# stays SOFT (never a hard cap) so a bucket that genuinely can't be
+# tightened further (real spacing/eligibility limits) still solves
+# instead of going INFEASIBLE.
+S1B_WEIGHT_SPREAD_TIER2 = 1_000
 
 # S3 heavy-flight spread (prompt §soft_objectives + REF_Constraints).
 # A flight with PAX >= S3_HEAVY_THRESHOLD counts as "heavy". The
@@ -743,6 +755,7 @@ def solve_allocation(
     raise_cap_uids: frozenset[tuple[str, str]] = frozenset(),
     day_level_by_bucket: dict[tuple[str, Role], int] | None = None,
     pinned_assignments: dict[str, str] | None = None,
+    hard_bucket_spread_max: int | None = None,
 ) -> AllocationSolverResult:
     """Solve the allocation problem.
 
@@ -755,6 +768,20 @@ def solve_allocation(
     Pass ``elig_ctx`` (the same one used to build the eligibility
     matrix) so the solver can apply the H4 partial-block max-1
     constraints around the handler's D-1hr and D+20min windows.
+
+    ``hard_bucket_spread_max``, if set (2026-09-23), turns the H18
+    same-(shift, role) spread into a HARD ceiling: no bucket may have
+    ``max(actual) - min(actual)`` exceed this value, on top of the
+    existing soft S1b penalty. This is a genuine "nobody gets left more
+    than N behind their least-loaded peer" guarantee — but because
+    CP-SAT solves the whole day as ONE combined model, a single bucket
+    that truly cannot be tightened this far (real H10 spacing /
+    eligibility limits) makes the ENTIRE day's model INFEASIBLE, not
+    just that bucket. Callers that want the guarantee should retry
+    without it (soft-only) on an INFEASIBLE status rather than falling
+    straight through to the greedy fallback, which drops every soft
+    objective for the whole day. Left ``None`` (default), spread stays
+    soft-only, as before.
 
     Caller is responsible for:
       - filtering flights to today's ops scope (D + N tail to 05:00 D+1)
@@ -1054,6 +1081,20 @@ def solve_allocation(
             spread_obj_terms.append(
                 S1B_WEIGHT_BUCKET_SPREAD * (bucket_max - bucket_min)
             )
+            # Escalating tier: spread beyond 1 gets hit again, on top
+            # of the base per-unit cost above, so a 3-flight gap costs
+            # noticeably more than two separate 1-flight gaps would.
+            spread_excess = model.new_int_var(
+                0, hi, f"spread_excess_{shift_code}_{role.value}",
+            )
+            model.add(spread_excess >= (bucket_max - bucket_min) - 1)
+            spread_obj_terms.append(S1B_WEIGHT_SPREAD_TIER2 * spread_excess)
+            # 2026-09-23: optional HARD ceiling on top of the soft
+            # terms above — see hard_bucket_spread_max docstring for
+            # the whole-day-INFEASIBLE trade-off. Callers that pass
+            # this should be ready to retry without it on INFEASIBLE.
+            if hard_bucket_spread_max is not None:
+                model.add(bucket_max - bucket_min <= hard_bucket_spread_max)
         n_h18_buckets += 1
         floor_note = f" (soft floor={band_lo})" if band_lo > 0 else ""
         print(f"  H18 spread bucket {shift_code}/{role.value}: "

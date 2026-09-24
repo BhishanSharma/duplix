@@ -33,24 +33,6 @@ table .cell-intl { background: var(--intl-yellow); }
 /* .cell-routing-hub removed Phase 3 / Change 9 — pink dropped */
 table .cell-special { background: var(--special-blue); }
 
-/* Override-drawer cells: type / employee / shift dropdowns +
-   disabled-cell visual when the column doesn't apply to the row's
-   type (e.g., limit column on a p2f / norse row). */
-#override-table td input[type="text"],
-#override-table td select {
-  width: 100%;
-  padding: 5px 8px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  font: inherit;
-  background: var(--bg-card);
-}
-#override-table td.cell-disabled {
-  background: var(--bg-elev);
-  text-align: center;
-  color: var(--subdued);
-}
-
 table.row-handover tbody tr.handover { background: #f4f4f4; color: var(--subdued); }
 
 #ds-risk-table { width: 100%; }

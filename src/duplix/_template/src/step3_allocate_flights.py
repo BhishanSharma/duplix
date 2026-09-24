@@ -1063,18 +1063,44 @@ def run(
     # clipped to [band.min, band.max] from configs/shift_limits.json.
     # Handlers (P2F + NORSE nominated) are excluded from the bucket —
     # they're already shape-shifted by their handler-specific rules.
+    #
+    # 2026-09-23 fix: ``total_flights`` above must be the flights that
+    # fall in THAT shift's own window, not the whole day's flight
+    # count. The previous version divided every bucket by the SAME
+    # global ratio (len(flights) / all-shifts' staff), so a shift with
+    # a much lighter night-time flight volume (e.g. N: ~169 flights /
+    # 18 staff =~ 9-10 each) still got handed the day-wide ratio
+    # (~21, driven by the much busier M/A shifts) before band-clipping
+    # ever saw it. Clipped up to band.min, that level was unreachable
+    # for anyone in the bucket, weakening S1's ability to pull the
+    # bucket together (2026-09-23: N/STAFF spread of 5-11 survived a
+    # 700s solve). Bucketing flights by their own shift window (same
+    # windowing the solver enforces via eligibility) gives each shift
+    # its own realistic ratio instead.
+    from .allocator.windows import SHIFT_NOMINAL_MIN as _SHIFT_NOMINAL_MIN
+    flights_per_shift_min: dict[ShiftCode, int] = defaultdict(int)
+    for f in flights:
+        f_std_min = std_to_ops_day_minutes(f.std, f.date, d_day)
+        for shift_code_iter, (s_start, s_end) in _SHIFT_NOMINAL_MIN.items():
+            if s_start <= f_std_min <= s_end:
+                flights_per_shift_min[shift_code_iter] += 1
+                break
     handler_set = set(p2f_handler_by_shift.values()) | set(norse_handler_ids)
     bucket_sizes: dict[tuple[ShiftCode, Role], int] = defaultdict(int)
+    staff_per_shift: dict[ShiftCode, int] = defaultdict(int)
     for s in staff_today:
         if (s.shift_today is None or s.role == Role.AM
                 or s.employee_id in handler_set):
             continue
         bucket_sizes[(s.shift_today, s.role)] += 1
-    total_assignable = sum(bucket_sizes.values()) or 1
-    raw_level = round(len(flights) / total_assignable)
+        staff_per_shift[s.shift_today] += 1
     from .allocator.caps import get_band as _get_band
     day_level_by_bucket: dict[tuple[ShiftCode, Role], int] = {}
     for (shift_code, role), size in bucket_sizes.items():
+        shift_staff_count = staff_per_shift.get(shift_code) or 1
+        raw_level = round(
+            flights_per_shift_min.get(shift_code, 0) / shift_staff_count
+        )
         band = _get_band(shift_code, role)
         if band is None:
             day_level_by_bucket[(shift_code, role)] = raw_level
@@ -1083,11 +1109,11 @@ def run(
         day_level_by_bucket[(shift_code, role)] = max(lo, min(raw_level, hi))
     if day_level_by_bucket:
         print(
-            f"  Day-level targeting: raw={raw_level} "
-            f"(flights={len(flights)} / non_handler_staff={total_assignable}); "
-            f"per-bucket clipped: "
+            "  Day-level targeting (per-shift ratio, 2026-09-23 fix): "
             + ", ".join(
-                f"{k[0]}/{k[1].value}={v}"
+                f"{k[0]}/{k[1].value}={v} "
+                f"(flights_in_shift={flights_per_shift_min.get(k[0], 0)}, "
+                f"staff_in_shift={staff_per_shift.get(k[0], 0)})"
                 for k, v in sorted(day_level_by_bucket.items())
             )
         )
@@ -1137,8 +1163,16 @@ def run(
             )
 
     # --- Solve ----------
-    result = solve_allocation(
-        flights, staff_today, matrix,
+    # 2026-09-23: try a HARD same-bucket spread ceiling of 2 first
+    # (user direction — "give that person a break" once they're more
+    # than 2 behind their least-loaded peer). If the day's real H10
+    # spacing / eligibility shape makes that impossible somewhere,
+    # CP-SAT reports the WHOLE day INFEASIBLE (one combined model —
+    # see hard_bucket_spread_max docstring), so we retry without the
+    # hard cap rather than falling all the way through to the greedy
+    # fallback, which would drop every soft objective for the entire
+    # day just because one bucket couldn't hit spread<=2.
+    _solve_kwargs = dict(
         ops_day=d_day,
         max_seconds=config.solver.max_seconds,
         elig_ctx=elig_ctx,
@@ -1170,6 +1204,38 @@ def run(
         # 2026-05-18 sick-call iteration: pin prior allocation in place.
         pinned_assignments=pinned_assignments or None,
     )
+    result = solve_allocation(
+        flights, staff_today, matrix,
+        hard_bucket_spread_max=2,
+        **{
+            **_solve_kwargs,
+            # 2026-09-23: give the hard-capped attempt a SHORT probe
+            # budget rather than the full config, so a bucket that
+            # can't hit spread<=2 fails fast instead of burning the
+            # whole time budget twice (once to fail here, again to
+            # solve properly below). If it's achievable, CP-SAT
+            # usually finds it well inside this window; if not, we
+            # want to find that out quickly and move on.
+            "max_seconds": max(60, min(config.solver.max_seconds // 2, 300)),
+        },
+    )
+    # Any non-usable status here (INFEASIBLE, TIMEOUT/UNKNOWN,
+    # MODEL_INVALID) means we do NOT have a real assignment set —
+    # only OPTIMAL/FEASIBLE do. Retry without the hard cap, with the
+    # FULL configured time budget, rather than falling through to the
+    # greedy fallback (which would drop every soft objective for the
+    # whole day just because one bucket couldn't hit spread<=2).
+    if result.status not in ("OPTIMAL", "FEASIBLE"):
+        print(
+            f"  Hard spread<=2 probe returned {result.status} — "
+            "retrying without the hard cap (soft spread penalty only, "
+            "full time budget)."
+        )
+        result = solve_allocation(
+            flights, staff_today, matrix,
+            hard_bucket_spread_max=None,
+            **_solve_kwargs,
+        )
 
     # --- Greedy fallback (2026-09-22) ----------
     # CP-SAT is an EXACT solver: if any combination of hard constraints
@@ -1306,11 +1372,64 @@ def run(
     rows, p2f_summary = _run_p2f_postpass(rows)
     rows, intl_summary = _run_intl_postpass(rows)
 
-    # Merge the two post-pass workload-note dicts (host -> list).
+    # 2026-09-23 fix: the P2F/INTL post-passes above remove flights
+    # from whoever happens to sit next to a P2F/INTL flight, not from
+    # whoever currently has the most flights — so they can re-open the
+    # spread the solver's H18 constraint just closed (see
+    # docs/REVIEW_NOTES.md finding #4). Run a final leveling pass:
+    # while a (shift, role) bucket's most- and least-loaded staff
+    # differ by more than 1, move one eligible flight from the former
+    # to the latter. Every move still respects eligibility, H10
+    # spacing, and hard caps — it only re-picks who among already-
+    # eligible people does which flight.
+    from .allocator.postpass_rebalance import apply_rebalance_pass
+    rows, rebalance_summary = apply_rebalance_pass(
+        rows, flights, staff_today, matrix,
+        p2f_handlers=elig_ctx.p2f_handler_by_shift,
+        norse_handlers=set(elig_ctx.norse_handler_ids),
+        d_day=d_day,
+    )
+    if rebalance_summary.n_transfers:
+        print(
+            f"  Rebalance pass: buckets_checked="
+            f"{rebalance_summary.n_buckets_checked} "
+            f"buckets_improved={rebalance_summary.n_buckets_improved} "
+            f"buckets_still_stuck={rebalance_summary.n_buckets_stuck} "
+            f"transfers={rebalance_summary.n_transfers}"
+        )
+        for line in rebalance_summary.log_lines[:20]:
+            print(f"  rebalance: {line}")
+        if len(rebalance_summary.log_lines) > 20:
+            print(f"  rebalance: ... + {len(rebalance_summary.log_lines) - 20} more lines")
+
+    # 2026-09-23 (user direction): floating 45-min break per on-shift
+    # staff, soft/best-effort, via 1-for-1 swaps only — never changes
+    # anyone's flight count, so it can't disturb the H18/rebalance
+    # workload spread above. Runs LAST, against the final schedule.
+    from .allocator.postpass_break import apply_break_pass
+    rows, break_summary = apply_break_pass(rows, flights, staff_today, matrix, d_day)
+    print(
+        f"  Break pass: considered={break_summary.n_staff_considered} "
+        f"already_clear={break_summary.n_clean} "
+        f"cleared_via_swap={break_summary.n_created_via_swap} "
+        f"partial={break_summary.n_partial} "
+        f"not_found={break_summary.n_not_found} "
+        f"swaps={break_summary.n_swaps}"
+    )
+    for line in break_summary.log_lines[:20]:
+        print(f"  break: {line}")
+    if len(break_summary.log_lines) > 20:
+        print(f"  break: ... + {len(break_summary.log_lines) - 20} more lines")
+
+    # Merge all post-pass workload-note dicts (host -> list).
     merged_workload_notes: dict[str, list[str]] = defaultdict(list)
     for sid, msgs in intl_summary.workload_notes.items():
         merged_workload_notes[sid].extend(msgs)
     for sid, msgs in p2f_summary.workload_notes.items():
+        merged_workload_notes[sid].extend(msgs)
+    for sid, msgs in rebalance_summary.workload_notes.items():
+        merged_workload_notes[sid].extend(msgs)
+    for sid, msgs in break_summary.workload_notes.items():
         merged_workload_notes[sid].extend(msgs)
 
     # 2026-05-26 fix: post-passes displace flights between staff via

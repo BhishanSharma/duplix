@@ -13,7 +13,6 @@
   font: inherit;
   cursor: pointer;
 }
-.btn:hover { background: var(--hover); }
 .btn-xs {
   padding: 2px 8px;
   font-size: 11px;
@@ -48,6 +47,5 @@ button.reco-propose.selected {
   color: var(--primary-text, #fff);
   border-color: var(--primary, #2563eb);
 }
-.btn-primary:hover { filter: brightness(1.07); }
 .btn-primary:disabled { opacity: 0.6; cursor: progress; }
 

@@ -13,8 +13,6 @@ import { $ } from "./core/dom.js";
 import * as layout from "./ui/layout.js";
 import * as tabs from "./ui/tabs.js";
 import * as confirmDialog from "./ui/confirm.js";
-import * as nominate from "./ui/nominate.js";
-import * as drawer from "./drawer/index.js";
 import * as setup from "./sidebar/index.js";
 import * as run from "./panels/run.js";
 import * as plan from "./panels/plan.js";
@@ -22,17 +20,7 @@ import * as handlers from "./panels/handlers.js";
 import * as staffing from "./panels/staffing.js";
 import * as dateControl from "./panels/date-control.js";
 
-/* The Override drawer and the Setup sidebar both slide in from the
- * right, so only one is ever open: whichever is being opened closes the
- * other first. Every open path goes through these two, including the
- * nominate popup's "Override" button. */
-async function openOverride() {
-  setup.close();
-  await drawer.open();
-}
-
 async function openSetup() {
-  drawer.close();
   await setup.open();
 }
 
@@ -43,7 +31,6 @@ const deps = {
   currentDate: () => dateControl.value(),
   setRunStatus: run.setRunStatus,
   triggerRun: run.triggerRun,
-  openDrawer: openOverride,
   openSetup,
   /** Everything an override edit can change, refreshed together. */
   refreshDashboard: async () => {
@@ -60,15 +47,12 @@ function init() {
   layout.mount();
 
   confirmDialog.init();
-  nominate.init({ onOpenOverride: openOverride });
-  drawer.init(deps);
   setup.init();
   tabs.init(deps);
   run.init();
   dateControl.init();
   layout.initGlobalHandlers();
 
-  $("#open-override").addEventListener("click", openOverride);
   $("#open-setup").addEventListener("click", openSetup);
   $("#reset-btn").addEventListener("click", () => {
     // Forget the applied date so re-committing the same one still

@@ -1,4 +1,5 @@
-/* ---- drawer ---- */
+/* ---- drawer shell ----
+   Used by the Setup sidebar (slides in from the right). */
 .drawer {
   position: fixed;
   right: 0;
@@ -48,33 +49,5 @@
   gap: 8px;
   padding-top: 12px;
   border-top: 1px solid var(--line);
-}
-
-#override-table input {
-  font: inherit;
-  padding: 3px 6px;
-  border: 1px solid var(--line);
-  border-radius: 4px;
-  width: 100%;
-  min-width: 80px;
-}
-#override-table .row-actions { white-space: nowrap; }
-
-/* 2026-05-27 fix: force the override drawer's table area to be tall
-   enough that newly-added rows are obviously visible. Without a
-   min-height, an empty IN_Override collapses the scroll-wrap to ~30
-   px (just the header row) and rows added by clicking Add row look
-   "hidden" because the table area is barely visible between the
-   description and the Add row button. 320 px = ~8 rows worth. */
-#override-drawer .scroll-wrap {
-  min-height: 320px;
-}
-/* Make rows visually pop a little more so a freshly added blank
-   row is immediately obvious. */
-#override-table tbody tr {
-  border-bottom: 1px solid var(--line);
-}
-#override-table tbody tr:nth-child(even) {
-  background: var(--bg-elev);
 }
 

@@ -1,10 +1,9 @@
 /* The Plan readback.
  *
  * Its visible output is small — it decides whether the post-Plan UI
- * (the Override button, the handler panel) is available, and flags the
- * one failure mode worth calling out: a Plan that ran but extracted
- * zero flights, which is almost always the wrong file in the flight
- * schedule slot.
+ * (the handler panel) is available, and flags the one failure mode
+ * worth calling out: a Plan that ran but extracted zero flights, which
+ * is almost always the wrong file in the flight schedule slot.
  *
  * The per-shift coverage bars this used to draw were removed once the
  * headcount moved under each workload distribution bar; the block
@@ -18,14 +17,11 @@ import * as inputs from "./inputs.js";
 export const template = `<div id="plan-block" hidden></div>`;
 
 /** Show or hide everything that only makes sense once Plan has run.
- *  Once the Override button is shown it stays shown — hiding it on a
+ *  Once the handler panel is shown it stays shown — hiding it on a
  *  later refresh produced a flicker between Plan completing and the
  *  next poll. */
 export function setPostPlanUI(planHasRun) {
-  if (planHasRun) {
-    $("#open-override").hidden = false;
-  } else {
-    $("#open-override").hidden = true;
+  if (!planHasRun) {
     $("#handlers-block").hidden = true;
   }
 }

@@ -15,6 +15,10 @@ Apply rules:
                   (same semantics as type=sick).
   change_role   → rewrite the staff's role, and their status when the
                   new role is ZC.
+  change_shift  → rewrite an EXISTING staff's shift/status for the day
+                  (M/A/N/M1/A1, or an off/leave code) — the Roster
+                  Change dashboard pane. Unlike add_staff/remove_staff
+                  this doesn't touch role or add a synthetic row.
   ZC list       → everyone on the saved Zone Controller list for D
                   (``zc_store``, picked on the dashboard) is promoted to
                   ZC, and anyone removed there is taken off ZC — even if
@@ -33,7 +37,9 @@ from typing import Any
 
 from . import zc_store
 from .schemas import (
+    NON_ASSIGNABLE,
     STATUS_IS_ZC,
+    STATUS_TO_SHIFT,
     AvailabilityRow,
     CleanFlightRow,
     CrewStatus,
@@ -101,6 +107,7 @@ def apply_staged_overrides(state: AppState, d_day: date_t) -> dict[str, int]:
         OverrideType.ADD_STAFF.value:     0,
         OverrideType.REMOVE_STAFF.value:  0,
         OverrideType.CHANGE_ROLE.value:   0,
+        OverrideType.CHANGE_SHIFT.value:  0,
         "zc_list":                        0,
     }
     with state.lock:
@@ -122,6 +129,9 @@ def apply_staged_overrides(state: AppState, d_day: date_t) -> dict[str, int]:
                     counts[OverrideType.REMOVE_STAFF.value] += 1
             elif tp == OverrideType.CHANGE_ROLE.value:
                 if _apply_change_role(state, row, d_day):
+                    counts[tp] += 1
+            elif tp == OverrideType.CHANGE_SHIFT.value:
+                if _apply_change_shift(state, row, d_day):
                     counts[tp] += 1
         # The dashboard's ZC list goes last, so an explicit change_role
         # row (e.g. ZC -> AM for someone who is unwell) is applied first
@@ -318,6 +328,50 @@ def _apply_change_role(state: AppState, row: Mapping[str, Any], d_day: date_t) -
             update["assignable"] = False
         state.availability[i] = av.model_copy(update=update)
         found = True
+    return found
+
+
+def _apply_change_shift(state: AppState, row: Mapping[str, Any], d_day: date_t) -> bool:
+    """Move an EXISTING staff member to a new shift, or off/on leave, for
+    the day — the Roster Change dashboard pane (search a name, pick M /
+    A / N / M1 / A1, or Off / On Leave).
+
+    The ``shift`` column carries the new status as the roster file's own
+    literal: a plain shift code, or an off/leave code (``F`` day-off,
+    ``P/L`` paid leave, ``C/L`` casual leave, ``C/OFF`` custom off).
+    Unlike ``remove_staff``/``sick`` this doesn't just flip a flag — it
+    rewrites status/current_shift so the person reappears correctly if
+    later moved back onto a shift. Unlike ``add_staff`` it never creates
+    a row: an unrecognized employee is a no-op, same as remove_staff.
+    """
+    name = _cell(row, "employee")
+    raw = _cell(row, "shift").upper()
+    if not (name and raw):
+        return False
+    try:
+        new_status = CrewStatus(raw)
+    except ValueError:
+        print(f"  [change_shift] skipped: unrecognized shift/status {raw!r}")
+        return False
+
+    target = _normalize_name(name)
+    d_iso = d_day.isoformat()
+    found = False
+    for i, av in enumerate(state.availability):
+        if _normalize_name(av.name) != target or av.date.isoformat() != d_iso:
+            continue
+        state.availability[i] = av.model_copy(update={
+            "status": new_status,
+            "raw_status": new_status.value,
+            "current_shift": STATUS_TO_SHIFT.get(new_status),
+            "assignable": new_status not in NON_ASSIGNABLE,
+        })
+        found = True
+    if not found:
+        print(
+            f"  [change_shift] WARNING: no roster row matches "
+            f"employee={name!r} on {d_iso}"
+        )
     return found
 
 

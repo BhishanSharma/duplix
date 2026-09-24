@@ -17,23 +17,14 @@ export const template = `
     <h2>Nominated handlers — <span id="handlers-date">—</span></h2>
     <p class="subdued">P2F handlers are auto-picked from STAFF roster cells
       marked <code>M/P2F</code>, <code>A/P2F</code>, <code>N/P2F</code>.
-      NORSE handler comes from an override row.
-      Edit via the <strong>Override</strong> drawer (top right).</p>
+      NORSE handler comes from a nomination.
+      Edit via the <strong>Handler Assign</strong> panel on the dashboard.</p>
     <div class="stat-grid" id="handlers-grid"></div>
   </div>`;
 
 export async function load() {
   await store.handlers.load();
-  // Any handler data at all proves Step 1+2 has run, so unhide the
-  // Override button from here too — belt and braces, in case the plan
-  // readback failed and left the UI without a way in.
   const h = store.handlers.data;
-  if (h) {
-    const planRan = (h.p2f && h.p2f.length > 0)
-      || (h.norse && h.norse.length > 0)
-      || (h.run_date && h.run_date !== "");
-    if (planRan) $("#open-override").hidden = false;
-  }
   render();
   return h;
 }
@@ -46,7 +37,7 @@ function p2fCard(shift, nominee) {
         <div class="stat-label">P2F handler — <code>${escapeHTML(shift)}</code></div>
       </div>`;
   }
-  const src = nominee.source === "roster" ? "from roster" : "from Override";
+  const src = nominee.source === "roster" ? "from roster" : "nominated";
   return `
     <div class="stat-card handler-card">
       <div class="stat-value">${escapeHTML(nominee.name)}</div>
@@ -66,8 +57,8 @@ function norseCards(norse) {
   return norse.map((n) => {
     const isAuto = n.source === "auto-pick";
     const src = isAuto
-      ? '<span class="subdued">(auto-picked — lock via Override if needed)</span>'
-      : '<span class="subdued">(from Override)</span>';
+      ? '<span class="subdued">(auto-picked — nominate via Handler Assign if needed)</span>'
+      : '<span class="subdued">(nominated)</span>';
     return `
       <div class="stat-card handler-card${isAuto ? " handler-auto" : ""}">
         <div class="stat-value">${escapeHTML(n.name)}</div>

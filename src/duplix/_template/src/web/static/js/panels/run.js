@@ -10,7 +10,6 @@ import { get, post } from "../core/api.js";
 import * as store from "../core/store.js";
 import * as tabs from "../ui/tabs.js";
 import { confirmModal } from "../ui/confirm.js";
-import * as nominate from "../ui/nominate.js";
 import * as plan from "./plan.js";
 import * as handlers from "./handlers.js";
 import * as staffing from "./staffing.js";
@@ -70,11 +69,10 @@ export async function triggerRun() {
 }
 
 export async function triggerPlan() {
-  // A new Plan hides Override + handlers and re-arms the nominate
-  // popup; held payloads go so the tables can't flash last run's
-  // numbers while the new one is in flight.
+  // A new Plan hides the handler panel until the next readback; held
+  // payloads go so the tables can't flash last run's numbers while the
+  // new one is in flight.
   plan.setPostPlanUI(false);
-  nominate.rearm();
   dropDerivedCaches();
   mode = "plan";
   await startRun("plan", "Plan");
@@ -96,7 +94,6 @@ export async function triggerReset() {
     return;
   }
   plan.setPostPlanUI(false);
-  nominate.rearm();
   dropDerivedCaches();
   setButtonsBusy(false);
   setRunStatus("Reset — results cleared", "ok");
@@ -149,16 +146,14 @@ export async function poll() {
   setRunStatus(`${label} completed in ${elapsed}s`, "ok");
   dropDerivedCaches();
 
-  // Order matters: the plan readback unhides Override and the handler
-  // panel, handlers populates it, then the tab renders. Awaiting each
-  // step keeps the popup decision after handlers are known.
+  // Order matters: the plan readback unhides the handler panel, handlers
+  // populates it, then the tab renders.
   await plan.load();
   await handlers.load();
   await staffing.load();
 
   if (mode === "plan") {
     await tabs.switchTab("dashboard");
-    nominate.maybeShow();
   } else {
     await tabs.loadTab(tabs.activeTab());
   }

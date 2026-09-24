@@ -13,28 +13,28 @@ allocation:
 
 # Step 3 solver parameters.
 solver:
-  # 2026-05-28 (user direction — restoring distribution quality): 350s
-  # was too aggressive. The solver was reaching FEASIBLE early but the
-  # S1b bucket-spread polish phase (which equalizes per-shift staff
-  # counts) kept getting cut short, producing -7 / -5 / -19 outliers in
-  # otherwise healthy shifts. 700s gives the solver the late-phase time
-  # it needs to drive max-min toward 0 across each bucket.
+  # Time budget for one CP-SAT solve, in seconds. Never set to 0: that made
+  # CP-SAT search indefinitely on a prior attempt (99 min CPU, 4.6 GB RAM).
   #
-  # Auto-retry (3 attempts in runner.py) is the safety net when a
-  # single attempt leaves UNALLOCATED >= 15 — worst-case total
-  # wall-clock = 3 * (700s + post-pass) ~ 40 min, ~12 min nominal.
-  # Never set to 0 — caused CP-SAT to search indefinitely on a prior
-  # attempt (99 min CPU, 4.6 GB RAM).
+  # History: 2026-05-28 the budget was raised toward 700s because the S1b
+  # bucket-spread polish phase was being cut short (-7 / -5 / -19 outliers).
+  # It was later dialed back to 350s, which reintroduced exactly that
+  # symptom (2026-09-23: N/STAFF spread of 5-11 on a 2,117-flight day,
+  # solver status FEASIBLE not OPTIMAL at the 350s cutoff). Back to 700s.
+  # NOTE: an earlier version of this comment described a 3-attempt auto-retry
+  # in web/runner.py when UNALLOCATED >= 15. That retry is NOT implemented
+  # in this build; each Allocate is a single solve.
   #
-  # Soft objective drives equality:
-  #   - S1 below-preferred: 100 per missing flight (pushes count up)
-  #   - S1 above-preferred: 50 / 500 / 1500 marginal (cap at +1/+2/+3)
-  #   - S1b bucket-spread:  600 per unit of (max - min) inside bucket
-  #     (bumped from 400 alongside the time bump — equalization is
-  #     more aggressive per-second so the budget pays off harder)
-  # Result: {23, 23} costs 100 vs {22, 24} costing 1750 — strongly
-  # prefers equal pairs over unequal pairs at the same sum.
-  max_seconds: 350
+  # Soft objective drives equality (see solver/allocator_cpsat.py for the
+  # authoritative weights):
+  #   - S1 day-level distance: 200 per flight (extra boost when far below)
+  #   - S1b bucket-spread:     600 per unit of (max - min) inside a
+  #                            (shift, role) bucket, +1000 per unit beyond
+  #                            a spread of 1 (2026-09-23)
+  # Result: {23, 23} is far cheaper than {22, 24} at the same total, and a
+  # 3+ spread is now heavily penalized rather than merely discouraged —
+  # but the solver still needs enough wall-clock time to find it.
+  max_seconds: 700
   deficit_penalty_lambda: 100   # legacy knob; ignored by lex objective, kept for API compat
 
 # State / cycle-history.
@@ -142,7 +142,8 @@ io:
     name_column: STAFF NAME      # was "NAME" — input files use STAFF NAME
     # Header pattern matches "30-Apr".
     date_header_format: "%d-%b"
-    # Number of leading rows after the header to skip (weekday sub-header in row 2).
+    # Max leading rows after the header to skip IF they look like a weekday
+    # sub-header (blank name / Mon Tue ...). A real staff row is never skipped.
     subheader_rows_to_skip: 1
 
 # ---------- Status normalization ----------

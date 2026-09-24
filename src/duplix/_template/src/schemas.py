@@ -386,6 +386,7 @@ class OverrideType(StrEnum):
     # Per-staff constraints (read at solve time)
     SICK               = "sick"
     CHANGE_ROLE        = "change_role"
+    CHANGE_SHIFT       = "change_shift"
     MAX_FLIGHTS        = "max_flights"
     CUTOFF_TIME        = "cutoff_time"
     # Staged-form mutations (apply directly to data sheets at save time)
@@ -409,17 +410,23 @@ OVERRIDE_TYPES_FOR_UI: tuple[OverrideType, ...] = (
     OverrideType.NORSE,
     OverrideType.SICK,
     OverrideType.CHANGE_ROLE,
+    OverrideType.CHANGE_SHIFT,
     OverrideType.MAX_FLIGHTS,
     OverrideType.CUTOFF_TIME,
 )
 
 
-# Subset that the staged-form helper accepts (add/remove flight/staff).
+# Subset that the staged-form helper accepts (add/remove flight/staff,
+# the Roster Change pane's shift moves, and the Handler Assign pane's
+# P2F/NORSE nominations — all apply immediately, no drawer round-trip).
 STAGED_FORM_OVERRIDE_TYPES: tuple[OverrideType, ...] = (
     OverrideType.ADD_FLIGHT,
     OverrideType.REMOVE_FLIGHT,
     OverrideType.ADD_STAFF,
     OverrideType.REMOVE_STAFF,
+    OverrideType.CHANGE_SHIFT,
+    OverrideType.P2F,
+    OverrideType.NORSE,
 )
 
 
@@ -448,6 +455,12 @@ OVERRIDE_TYPE_RELEVANT_COLS: dict[OverrideType, tuple[str, ...]] = {
     # (STAFF / ZC / AM), not a shift code — the frontend swaps the
     # dropdown's option set when type=change_role.
     OverrideType.CHANGE_ROLE:       ("type", "employee", "shift"),
+    # change_shift: the "shift" column carries the new CrewStatus literal
+    # for an EXISTING staff member — a plain shift code (M/A/N/M1/A1) to
+    # move them, or an off/leave code (F day-off, P/L paid leave, C/L
+    # casual leave, C/OFF custom off) to pull them off today without
+    # dropping their roster row. Roster Change pane on the dashboard.
+    OverrideType.CHANGE_SHIFT:      ("type", "employee", "shift"),
     OverrideType.MAX_FLIGHTS:       ("type", "employee", "limit"),
     # cutoff_time: windowed (from_time + to_time). Either may be blank;
     # the engine falls back to the staff's normal shift boundary.

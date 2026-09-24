@@ -1,11 +1,13 @@
 /* Vertical workload bars */
 .workload-dist-v { width: 100%; }
 .vbar-row {
-  display: flex; align-items: flex-end;
+  display: flex; 
+  align-items: flex-end;
   gap: 18px;
-  height: 240px;
+  height: 290px;
   padding: 0 8px 4px 8px;
   border-bottom: 1px solid var(--line);
+  align-self: stretch;
 }
 .vbar-col {
   flex: 1;

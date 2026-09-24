@@ -18,6 +18,8 @@ import * as shiftSummary from "../charts/shift-summary.js";
 import * as flightTrend from "../charts/flight-trend.js";
 import * as rosterChart from "../charts/roster.js";
 import * as zcSelector from "../panels/zc-selector.js";
+import * as rosterEdit from "../panels/roster-edit.js";
+import * as handlerAssign from "../panels/handler-assign.js";
 import * as unallocatedView from "./unallocated.js";
 
 export const id = "dashboard";
@@ -91,12 +93,30 @@ export const template = `
           picked up by each shift.</p>
         <div id="ds-flights-pie" class="flights-pie"></div>
       </div>
-      <aside class="ds-chart-cell zc-selector" aria-labelledby="zc-selector-title">
-        <h2 id="zc-selector-title">Zone Controllers</h2>
-        <p class="subdued">Search the AM List and Staff together to pick the day's Zone Controllers. The list is saved and carries over to the next day.</p>
-        <input id="zc-selector-search" type="search" placeholder="Search person" aria-label="Search AM List and Staff">
-        <div id="zc-selector-list"></div>
-      </aside>
+      <div class="ds-side-panels">
+        <aside class="ds-chart-cell zc-selector" aria-labelledby="zc-selector-title">
+          <h2 id="zc-selector-title">Zone Controllers</h2>
+          <p class="subdued">Search the AM List to pick the day's Zone Controllers. The list is saved and carries over to the next day.</p>
+          <input id="zc-selector-search" type="search" placeholder="Search person" aria-label="Search AM List">
+          <div id="zc-selector-list"></div>
+        </aside>
+        <aside class="ds-chart-cell roster-edit" aria-labelledby="roster-edit-title">
+          <h2 id="roster-edit-title">Roster Change</h2>
+          <p class="subdued">Search a staff member and move them to a
+            different shift (M / A / N / M1 / A1), or take them Off for
+            today. Applies right away.</p>
+          <input id="roster-edit-search" type="search" placeholder="Search person" aria-label="Search staff to change">
+          <div id="roster-edit-list"></div>
+        </aside>
+        <aside class="ds-chart-cell handler-assign" aria-labelledby="handler-assign-title">
+          <h2 id="handler-assign-title">Handler Assign</h2>
+          <p class="subdued">Search a staff member and nominate them as
+            the P2F handler for a shift (M / A / N) or as the NORSE
+            handler. Applies right away.</p>
+          <input id="handler-assign-search" type="search" placeholder="Search person" aria-label="Search staff to nominate">
+          <div id="handler-assign-list"></div>
+        </aside>
+      </div>
     </div>
 
     <h2 class="block-heading">Shift summary</h2>
@@ -219,9 +239,13 @@ export async function renderCharts() {
   flightTrend.render(allocRows, dDay, wlRows);
   rosterChart.render(names);
   await zcSelector.load();
+  await rosterEdit.load();
+  await handlerAssign.load();
 }
 
 export function init(deps) {
   inputsPanel.init(deps);
   zcSelector.init();
+  rosterEdit.init();
+  handlerAssign.init();
 }

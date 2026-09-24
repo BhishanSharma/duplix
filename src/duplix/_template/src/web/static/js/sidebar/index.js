@@ -7,18 +7,21 @@
  * They live here instead: opened from the topbar, filled on the first
  * day of the period, then left alone.
  *
- * Same shell as the Override drawer (slides from the right, closes on
- * Escape or an outside click) but a separate surface, because these are
- * session inputs rather than per-run edits.
+ * Slides in from the right, closes on Escape or an outside click. Also
+ * owns the "Add international airport code" form — a once-in-a-while
+ * config edit, not a per-run override, so it lives here too.
  */
 
 import { $ } from "../core/dom.js";
-import { getOr } from "../core/api.js";
+import { getOr, post } from "../core/api.js";
 import * as slots from "../panels/input-slots.js";
 import * as dateControl from "../panels/date-control.js";
 
 /** The kinds this sidebar owns, in the order they're shown. */
 const KINDS = ["staff_roster", "am_roster"];
+
+/** IATA codes are exactly three letters. */
+const AIRPORT_CODE_LENGTH = 3;
 
 export const template = `
   <aside class="drawer" id="setup-sidebar" hidden
@@ -49,12 +52,26 @@ export const template = `
         </p>
       </section>
 
-      <section class="setup-section">
-        <h3>Today's flight schedule</h3>
-        <p class="subdued small">
-          Not here on purpose — the schedule is a fresh export every
-          morning, so it's on the dashboard where the day starts.
+      <section class="drawer-section" id="setup-intl-airport">
+        <h3>Add international airport code</h3>
+        <p class="subdued">
+          Appends to <code>international_airport_codes</code> in
+          <code>configs/config.yml</code>. The new code is picked up on
+          the next Plan / Allocate run.
         </p>
+        <form id="intl-airport-form" autocomplete="off">
+          <label>
+            Code
+            <input id="intl-airport-code" type="text" maxlength="${AIRPORT_CODE_LENGTH}"
+                   placeholder="e.g. BLR" required>
+          </label>
+          <label>
+            Airport name / city (optional)
+            <input id="intl-airport-name" type="text" placeholder="e.g. Bengaluru">
+          </label>
+          <button id="intl-airport-save" class="primary" type="submit">Add</button>
+          <span class="intl-airport-status" id="intl-airport-status"></span>
+        </form>
       </section>
     </div>
   </aside>`;
@@ -101,8 +118,48 @@ function renderStatus() {
   }
 }
 
+function setAirportStatus(message, ok) {
+  const el = $("#intl-airport-status");
+  if (!el) return;
+  el.textContent = message || "";
+  el.classList.toggle("ok", !!ok);
+  el.classList.toggle("err", !!message && !ok);
+}
+
+function initIntlAirportForm() {
+  const form = $("#intl-airport-form");
+  if (!form) return;
+
+  // Force uppercase and strip non-letters as the operator types, so
+  // case is never something they have to think about.
+  $("#intl-airport-code").addEventListener("input", (ev) => {
+    const cleaned = ev.target.value.replace(/[^A-Za-z]/g, "").toUpperCase();
+    if (cleaned !== ev.target.value) ev.target.value = cleaned;
+  });
+
+  form.addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const code = ($("#intl-airport-code").value || "").trim().toUpperCase();
+    const name = ($("#intl-airport-name").value || "").trim();
+    if (code.length !== AIRPORT_CODE_LENGTH) {
+      setAirportStatus(`Code must be exactly ${AIRPORT_CODE_LENGTH} letters.`, false);
+      return;
+    }
+    setAirportStatus("Saving…", true);
+    try {
+      await post("/api/intl_airports", { code, name });
+      setAirportStatus(`Added ${code} to international list.`, true);
+      $("#intl-airport-code").value = "";
+      $("#intl-airport-name").value = "";
+    } catch (e) {
+      setAirportStatus(e.message || "Save failed.", false);
+    }
+  });
+}
+
 export function init() {
   slots.registerMount("#setup-inputs-list", KINDS, renderStatus);
   slots.bindMount("#setup-inputs-list");
   $("#close-setup").addEventListener("click", close);
+  initIntlAirportForm();
 }

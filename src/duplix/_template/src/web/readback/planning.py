@@ -218,6 +218,38 @@ def read_staff_names(state: AppState) -> dict[str, Any]:
     return {"run_date": run_date, "names": names}
 
 
+def read_roster_full(state: AppState) -> dict[str, Any]:
+    """Every staff/AM/ZC row for the run date, INCLUDING anyone currently
+    off / on leave / sick (``read_staff_names`` drops those, since it
+    drives dropdowns that only make sense for someone on a shift today).
+
+    Drives the Roster Change pane's search: an assigner who marked
+    someone off needs to be able to find that person again to put them
+    back on a shift, so the search list can't shrink when a person is
+    taken off it.
+    """
+    names: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    with state.lock:
+        d_iso = run_date_iso(state)
+        for av in state.availability:
+            if d_iso and av.date.isoformat() != d_iso:
+                continue
+            name = av.name.strip()
+            if not name or name in seen:
+                continue
+            seen.add(name)
+            names.append({
+                "name": name,
+                "role": av.role.value,
+                "shift": av.current_shift or "",
+                "status": av.status.value,
+                "assignable": av.assignable,
+            })
+    names.sort(key=lambda x: x["name"])
+    return {"run_date": d_iso, "names": names}
+
+
 def read_staffing(state: AppState) -> dict[str, Any]:
     with state.lock:
         return {"run_date": run_date_iso(state), "rows": list(state.staffing)}

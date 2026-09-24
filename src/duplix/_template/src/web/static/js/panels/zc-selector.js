@@ -3,14 +3,15 @@
  * The rosters no longer carry /ZC, so this panel is where ZCs come from.
  * The list is saved per date on the server and carried over to the next
  * day until it is edited: open tomorrow, see today's ZCs pre-filled, add
- * or remove whoever changed. Anyone on the roster can be picked — AM List
- * and Staff are searched together.
+ * or remove whoever changed. Candidates are drawn from the AM List only
+ * — that's where ZCs are picked from day to day.
  */
 
 import { $, escapeHTML } from "../core/dom.js";
 import { get, post } from "../core/api.js";
 import * as store from "../core/store.js";
 import * as rosterChart from "../charts/roster.js";
+import * as autocomplete from "../ui/autocomplete.js";
 
 let query = "";
 let saving = false;
@@ -29,13 +30,14 @@ function group(person) {
   return String(person.role || "").toUpperCase() === "AM" ? "AM List" : "Staff";
 }
 
+/** Only the AM List is shown below the selected badges — Staff is left
+ *  out on purpose, the AM roster is where ZCs are picked from day to
+ *  day. Searching still matches against the AM List only. */
 function candidates() {
   const matches = store.staffNames.data.filter((person) =>
-    !isZc(person) && String(person.name || "").toLowerCase().includes(query));
-  return {
-    am: matches.filter((person) => group(person) === "AM List"),
-    staff: matches.filter((person) => group(person) === "Staff"),
-  };
+    !isZc(person) && group(person) === "AM List"
+    && String(person.name || "").toLowerCase().includes(query));
+  return { am: matches };
 }
 
 function section(title, entries) {
@@ -92,7 +94,7 @@ export function render() {
   }
 
   const groups = candidates();
-  const rest = `${section("AM List", groups.am)}${section("Staff", groups.staff)}`;
+  const rest = section("AM List", groups.am);
   const empty = !rosterLoaded
     ? "Run Plan to load the roster, then pick Zone Controllers."
     : "No matching people.";
@@ -144,6 +146,13 @@ export function init() {
   $("#zc-selector-search").addEventListener("input", (event) => {
     query = event.target.value.trim().toLowerCase();
     render();
+  });
+  autocomplete.attach($("#zc-selector-search"), {
+    getCandidates: (q) => {
+      const pool = store.staffNames.data.filter((p) => !isZc(p) && group(p) === "AM List");
+      return autocomplete.rank(pool, q)
+        .map((p) => ({ label: p.name, sublabel: p.shift || "AM List" }));
+    },
   });
   $("#zc-selector-list").addEventListener("click", (event) => {
     const remove = event.target.closest(".zc-remove");

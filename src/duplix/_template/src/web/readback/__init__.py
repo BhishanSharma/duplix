@@ -23,6 +23,7 @@ from .dashboard import read_dashboard
 from .planning import (
     read_handlers,
     read_plan_summary,
+    read_roster_full,
     read_shift_limits,
     read_staff_names,
     read_staffing,
@@ -54,6 +55,7 @@ __all__ = [
     "read_plan_summary",
     "read_recommendations",
     "read_roster_counts",
+    "read_roster_full",
     "read_server_date",
     "read_shift_limits",
     "read_staff_names",
