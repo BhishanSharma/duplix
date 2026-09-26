@@ -62,6 +62,8 @@ from .windows import (
     SHIFT_STD_WINDOW_INNER,
     ZC_BUFFER_END_MIN,
     ZC_BUFFER_START_MIN,
+    SpacingKey,
+    spacing_key,
     std_to_ops_day_minutes,
 )
 
@@ -143,14 +145,13 @@ def _is_displaceable(flight: FlightInput) -> bool:
     """A flight that the P2F post-pass is allowed to remove from the
     handler's allocation. Excludes:
       - P2F flights themselves (never displaced)
-      - NORSE flights (handler-dedicated)
       - INTL DEP flights (Phase 3 / Change 4: same handler start-to-
         finish — INTL DEP allocations are sacred after the solver)
 
     Per spec §3: the post-pass removes flights from the handler's
     list AROUND the P2F flight — never the P2F flight itself.
     """
-    if flight.ops_class in (OpsClass.P2F, OpsClass.NORSE):
+    if flight.ops_class == OpsClass.P2F:
         return False
     # Phase 3 (2026-05-14, INTL overhaul / Change 4): an INTL DEP
     # flight must stay with its assigned handler (self-pair). The P2F
@@ -164,7 +165,6 @@ def apply_p2f_post_pass_v2(
     staff_today: list[StaffMember],
     matrix: dict[str, set[str]],
     p2f_handlers: dict[ShiftCode, str],
-    norse_handlers: set[str],
     d_day: date_t,
 ) -> tuple[list[AllocationRow], P2FPostPassSummary]:
     """Alternate P2F post-pass (user direction 2026-05-28).
@@ -216,7 +216,7 @@ def apply_p2f_post_pass_v2(
         }
 
     counts: dict[str, int] = defaultdict(int)
-    staff_stds: dict[str, list[int]] = defaultdict(list)
+    staff_stds: dict[str, list[SpacingKey]] = defaultdict(list)
     for uid, st in rstate.items():
         if not st["staff_id"]:
             continue
@@ -224,9 +224,7 @@ def apply_p2f_post_pass_v2(
         if f_ref is None:
             continue
         counts[st["staff_id"]] += 1
-        staff_stds[st["staff_id"]].append(
-            std_to_ops_day_minutes(f_ref.std, f_ref.date, d_day),
-        )
+        staff_stds[st["staff_id"]].append(spacing_key(f_ref, d_day))
     excluded: set[str] = set()
 
     p2f_uids = sorted(
@@ -309,7 +307,7 @@ def apply_p2f_post_pass_v2(
                 cand_uid, p2f_f, holder_id, "v2-window", rstate,
                 flight_by_uid, staff_today, matrix, counts,
                 staff_stds, excluded, p2f_handlers,
-                norse_handlers, d_day, summary,
+                d_day, summary,
             )
             if rstate[cand_uid]["staff_id"] != holder_id:
                 removed_for_this_p2f.append(
@@ -383,7 +381,6 @@ def apply_p2f_post_pass(
     staff_today: list[StaffMember],
     matrix: dict[str, set[str]],
     p2f_handlers: dict[ShiftCode, str],
-    norse_handlers: set[str],
     d_day: date_t,
     tolerance_minutes: int = 15,
 ) -> tuple[list[AllocationRow], P2FPostPassSummary]:
@@ -419,7 +416,7 @@ def apply_p2f_post_pass(
 
     # Per-staff state for §4: counts + STD lists (for H10 spacing).
     counts: dict[str, int] = defaultdict(int)
-    staff_stds: dict[str, list[int]] = defaultdict(list)
+    staff_stds: dict[str, list[SpacingKey]] = defaultdict(list)
     for uid, st in rstate.items():
         if not st["staff_id"]:
             continue
@@ -427,9 +424,7 @@ def apply_p2f_post_pass(
         if f_ref is None:
             continue
         counts[st["staff_id"]] += 1
-        staff_stds[st["staff_id"]].append(
-            std_to_ops_day_minutes(f_ref.std, f_ref.date, d_day),
-        )
+        staff_stds[st["staff_id"]].append(spacing_key(f_ref, d_day))
     excluded: set[str] = set()
 
     # Iterate P2F flights chronologically.
@@ -585,7 +580,7 @@ def apply_p2f_post_pass(
                     best_uid, p2f_f, host_id, label, rstate,
                     flight_by_uid, staff_today, matrix, counts,
                     staff_stds, excluded, p2f_handlers,
-                    norse_handlers, d_day, summary,
+                    d_day, summary,
                 )
                 if rstate[best_uid]["staff_id"] != host_id:
                     removed_for_this_p2f.append(
@@ -672,10 +667,9 @@ def _displace_one(
     staff_today: list[StaffMember],
     matrix: dict[str, set[str]],
     counts: dict[str, int],
-    staff_stds: dict[str, list[int]],
+    staff_stds: dict[str, list[SpacingKey]],
     excluded: set[str],
     p2f_handlers: dict[ShiftCode, str],
-    norse_handlers: set[str],
     d_day: date_t,
     summary: P2FPostPassSummary,
 ) -> None:
@@ -684,16 +678,14 @@ def _displace_one(
     flight on the handler (no-op) and log the failure."""
     dst = rstate[displaced_uid]
     displaced_f = flight_by_uid[displaced_uid]
-    displaced_min = std_to_ops_day_minutes(
-        displaced_f.std, displaced_f.date, d_day,
-    )
+    displaced_entry = spacing_key(displaced_f, d_day)
 
     # Temporarily decrement the handler's count + remove the STD so
     # §4 sees an accurate post-removal state.
     counts[handler_id] = max(0, counts.get(handler_id, 0) - 1)
     if handler_id in staff_stds:
         with contextlib.suppress(ValueError):
-            staff_stds[handler_id].remove(displaced_min)
+            staff_stds[handler_id].remove(displaced_entry)
 
     # Exclude the handler so the same person doesn't take their own
     # flight back.
@@ -701,13 +693,13 @@ def _displace_one(
     new_holder = _most_eligible(
         displaced_f, staff_today, matrix, counts, excluded_for_pick,
         preferred_shift=None,  # any qualifying shift
-        p2f_handlers=p2f_handlers, norse_handlers=norse_handlers,
-        staff_stds=staff_stds, flight_std_min=displaced_min,
+        p2f_handlers=p2f_handlers,
+        staff_stds=staff_stds, flight_key=displaced_entry,
     )
     if new_holder is None:
         # Restore — keep the flight on the handler.
         counts[handler_id] += 1
-        staff_stds.setdefault(handler_id, []).append(displaced_min)
+        staff_stds.setdefault(handler_id, []).append(displaced_entry)
         summary.n_redistribute_failed += 1
         summary.log(
             f"P2F flt {p2f_f.flt} ({anchor_label}): could not redistribute "
@@ -717,7 +709,7 @@ def _displace_one(
 
     # Commit the reassignment.
     counts[new_holder.employee_id] = counts.get(new_holder.employee_id, 0) + 1
-    staff_stds.setdefault(new_holder.employee_id, []).append(displaced_min)
+    staff_stds.setdefault(new_holder.employee_id, []).append(displaced_entry)
     dst["staff_id"] = new_holder.employee_id
     dst["staff_name"] = new_holder.name
     dst["sheet_target"] = sheet_target_for(displaced_f, new_holder)

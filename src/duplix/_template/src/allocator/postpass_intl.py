@@ -13,7 +13,7 @@ DEP-only redefinition — Change 9), the post-pass:
   * **Escalates to 2 preceding flights** if the same handler already
     has a prior INTL DEP within 15-20 min (Change 3 — extra buffer for
     tight INTL-INTL clusters).
-  * P2F and NORSE preceding flights are **skipped over** — only
+  * P2F preceding flights are **skipped over** — only
     normal-domestic flights are eligible for removal.
 
 §2.A (the 5-case cross-shift preplan table) was DELETED in Phase 3
@@ -46,11 +46,7 @@ from ..schemas import (
 )
 from .caps import hard_cap_for
 from .eligibility import sheet_target_for
-from .windows import (
-    SPACING_HARD_MIN,
-    required_spacing_min,
-    std_to_ops_day_minutes,
-)
+from .windows import SpacingKey, spacing_clear, spacing_key, std_to_ops_day_minutes
 
 # Aviation pre-plan offset: planning happens at D-75 (75 min before STD).
 # Kept here for re-export — eligibility.py owns the canonical constant
@@ -86,17 +82,17 @@ def compute_removal_count(prev_intl_gap_min: int | None) -> int:
 def _eligible_for_removal(flight: FlightInput | None) -> bool:
     """Phase 3 / Change 2 — a flight is eligible to be displaced by the
     INTL DEP preceding-flight rule iff it's a plain-domestic flight
-    (not INTL, not P2F, not NORSE).
+    (not INTL, not P2F).
 
     Renamed from ``_is_plain_domestic`` for clarity per the Change 2
     amendment that scopes the removable-prior pool to normal domestic
-    flights only (skips P2F + NORSE).
+    flights only (skips P2F).
     """
     if flight is None:
         return False
     if flight.is_international:
         return False
-    return flight.ops_class not in (OpsClass.P2F, OpsClass.NORSE)
+    return flight.ops_class != OpsClass.P2F
 
 
 @dataclass
@@ -125,8 +121,6 @@ class PostPassSummary:
 
 # ---------- §4 most-eligible helper (still used by postpass_p2f) ----------
 
-SPACING_MIN = 15  # H10 hard min, mirrored from windows.SPACING_HARD_MIN
-
 
 def _most_eligible(
     flight: FlightInput,
@@ -136,22 +130,21 @@ def _most_eligible(
     excluded_recipients: set[str],
     preferred_shift: ShiftCode | None,
     p2f_handlers: dict[ShiftCode, str],
-    norse_handlers: set[str],
-    staff_stds: dict[str, list[int]],
-    flight_std_min: int,
+    staff_stds: dict[str, list[SpacingKey]],
+    flight_key: SpacingKey,
     target_max: int = 22,
-    hard_cap: int = 24,
 ) -> StaffMember | None:
     """Pick the most-eligible staff for ``flight`` (user §4 + H10 guard).
 
     Filters in priority order:
       1. Shift's STD window covers this flight (matrix encodes this)
       2. ``current_counts[s] < target_max`` (has room below target)
-      3. P2F → P2F-licensed only; NORSE → nominated handler only
+      3. P2F → P2F-licensed only
       4. Not in ``excluded_recipients`` (no cascading post-pass)
       5. Hard cap holds
       6. Eligibility matrix includes them for this flight
-      7. **H10 spacing**: no existing flight within ±15 min of this STD
+      7. **H10 spacing**: every existing flight keeps its gap to this
+         STD (15 min, 30 when a domestic flight precedes an INTL one)
 
     Tie-break: lowest current count, then alphabetical by name.
 
@@ -160,7 +153,6 @@ def _most_eligible(
     covers the STD.
     """
     eligible_set = matrix.get(flight.unique_id, set())
-    norse_required = flight.ops_class == OpsClass.NORSE
     p2f_required = flight.ops_class == OpsClass.P2F
 
     def _candidate(s: StaffMember) -> bool:
@@ -175,16 +167,7 @@ def _most_eligible(
             return False
         if p2f_required and not s.is_p2f_licensed:
             return False
-        if norse_required and norse_handlers and s.employee_id not in norse_handlers:
-            return False
-        existing = staff_stds.get(s.employee_id, ())
-        # Patch 2026-05-15: band-aware H10 floor. ``required_spacing_min``
-        # returns 10 when both flights' STDs are in the relaxed bands,
-        # else 15. Matches the solver's per-flight IntervalVar length.
-        return all(
-            abs(std - flight_std_min) >= required_spacing_min(std, flight_std_min)
-            for std in existing
-        )
+        return spacing_clear(flight_key, staff_stds.get(s.employee_id, ()))
 
     def _pick_from(pool: list[StaffMember]) -> StaffMember | None:
         under = [s for s in pool if current_counts.get(s.employee_id, 0) < target_max]
@@ -213,7 +196,6 @@ def apply_intl_post_pass(
     staff_today: list[StaffMember],
     matrix: dict[str, set[str]],
     elig_ctx_p2f_handlers: dict[ShiftCode, str],
-    elig_ctx_norse_handlers: set[str],
     d_day: date_t,
     skip_intl_removal_keys: frozenset[str] = frozenset(),
 ) -> tuple[list[AllocationRow], PostPassSummary]:
@@ -225,7 +207,7 @@ def apply_intl_post_pass(
       - Compute the same handler's previous INTL DEP gap (if any).
       - ``compute_removal_count(gap)`` decides 1 or 2 removals.
       - Remove that many of the host's chronologically PREVIOUS
-        normal-domestic flights (skip P2F + NORSE); each removed
+        normal-domestic flights (skip P2F); each removed
         flight goes to §4 redistribution.
     """
     summary = PostPassSummary()
@@ -276,19 +258,17 @@ def apply_intl_post_pass(
             counts[st["staff_id"]].add(uid)
     current_counts = {sid: len(uids) for sid, uids in counts.items()}
 
-    # Per-staff sorted STD list (in ops-day minutes) for H10 enforcement
-    # in §4 most-eligible. Refreshed every time we move a flight between
-    # staff so each new redistribution sees the up-to-date schedule.
-    staff_stds: dict[str, list[int]] = defaultdict(list)
+    # Per-staff SpacingKey list for H10 enforcement in §4 most-eligible.
+    # Refreshed every time we move a flight between staff so each new
+    # redistribution sees the up-to-date schedule.
+    staff_stds: dict[str, list[SpacingKey]] = defaultdict(list)
     for uid, st in rstate.items():
         if not st["staff_id"]:
             continue
         f_ref = flight_by_uid.get(uid)
         if f_ref is None:
             continue
-        staff_stds[st["staff_id"]].append(
-            std_to_ops_day_minutes(f_ref.std, f_ref.date, d_day),
-        )
+        staff_stds[st["staff_id"]].append(spacing_key(f_ref, d_day))
 
     # Recipients-already-touched: §4 forbids cascading.
     excluded: set[str] = set()
@@ -344,7 +324,7 @@ def apply_intl_post_pass(
         _apply_preceding_removal(
             f, uid, host, n_to_remove, rstate, current_counts,
             excluded, summary, flight_by_uid, staff_today, matrix, d_day,
-            elig_ctx_p2f_handlers, elig_ctx_norse_handlers, staff_stds,
+            elig_ctx_p2f_handlers, staff_stds,
         )
 
     # Rebuild the rows list from rstate.
@@ -382,7 +362,7 @@ def apply_intl_post_pass(
 def _set_assignee(
     st: dict, new_staff: StaffMember,
     counts: dict[str, int], old_staff_id: str | None,
-    staff_stds: dict[str, list[int]], flight_std_min: int,
+    staff_stds: dict[str, list[SpacingKey]], flight_key: SpacingKey,
 ) -> None:
     """Move the row's staff field from ``old_staff_id`` to ``new_staff``.
 
@@ -393,9 +373,9 @@ def _set_assignee(
         counts[old_staff_id] = max(0, counts.get(old_staff_id, 0) - 1)
         if old_staff_id in staff_stds:
             with contextlib.suppress(ValueError):
-                staff_stds[old_staff_id].remove(flight_std_min)
+                staff_stds[old_staff_id].remove(flight_key)
     counts[new_staff.employee_id] = counts.get(new_staff.employee_id, 0) + 1
-    staff_stds.setdefault(new_staff.employee_id, []).append(flight_std_min)
+    staff_stds.setdefault(new_staff.employee_id, []).append(flight_key)
     st["staff_id"] = new_staff.employee_id
     st["staff_name"] = new_staff.name
 
@@ -414,12 +394,11 @@ def _apply_preceding_removal(
     matrix: dict[str, set[str]],
     d_day: date_t,
     p2f_handlers: dict[ShiftCode, str],
-    norse_handlers: set[str],
-    staff_stds: dict[str, list[int]],
+    staff_stds: dict[str, list[SpacingKey]],
 ) -> None:
     """Phase 3 / Changes 2 + 3 — remove up to ``n_to_remove`` of the
     host's chronologically previous **normal-domestic** flights and
-    redistribute each via §4. P2F and NORSE flights are skipped.
+    redistribute each via §4. P2F flights are skipped.
     """
     intl_std_min = std_to_ops_day_minutes(f.std, f.date, d_day)
     # Candidate set: host's flights with STD < intl_std_min, eligible
@@ -448,23 +427,24 @@ def _apply_preceding_removal(
 
     for displaced_std_min, displaced_uid in targets:
         displaced_f = flight_by_uid[displaced_uid]
+        displaced_entry = spacing_key(displaced_f, d_day)
         dst = rstate[displaced_uid]
         # Remove from host; pool via §4 (exclude host so flight doesn't
         # bounce back to them — guards against self-cycles).
         counts[host.employee_id] = max(0, counts.get(host.employee_id, 0) - 1)
         if host.employee_id in staff_stds:
             with contextlib.suppress(ValueError):
-                staff_stds[host.employee_id].remove(displaced_std_min)
+                staff_stds[host.employee_id].remove(displaced_entry)
         excluded_for_pool = excluded | {host.employee_id}
         new_holder = _most_eligible(
             displaced_f, staff_today, matrix, counts, excluded_for_pool,
             None,
-            p2f_handlers, norse_handlers, staff_stds, displaced_std_min,
+            p2f_handlers, staff_stds, displaced_entry,
         )
         if new_holder is None:
             # Restore the flight on the host (no eligible recipient found).
             counts[host.employee_id] += 1
-            staff_stds.setdefault(host.employee_id, []).append(displaced_std_min)
+            staff_stds.setdefault(host.employee_id, []).append(displaced_entry)
             summary.n_redistribute_failed += 1
             summary.log(
                 f"INTL flt {f.flt}: preceding-removal failed — no eligible "
@@ -486,7 +466,7 @@ def _apply_preceding_removal(
             continue
         _set_assignee(
             dst, new_holder, counts, host.employee_id,
-            staff_stds, displaced_std_min,
+            staff_stds, displaced_entry,
         )
         dst["sheet_target"] = sheet_target_for(displaced_f, new_holder)
         excluded.add(new_holder.employee_id)

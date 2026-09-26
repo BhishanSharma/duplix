@@ -1,7 +1,9 @@
 """Shift-window tables and time helpers for Step 4.
 
 The numbers below are the single source of truth for H7 (tail extensions),
-H9 (ZC report buffers), H10 (15-min spacing), H12 (international ±60min),
+H9 (ZC report buffers), H10 (15-min spacing, 30 min domestic→INTL and
+P2F↔P2F),
+H12 (international ±60min),
 and H15 (awkward-window routing). They mirror REF_Constraints in the
 unified workbook — keep them in lockstep when either side changes.
 
@@ -14,10 +16,11 @@ crossing edge cases everywhere downstream.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from datetime import date as date_t
 from datetime import time as time_t
 
-from ..schemas import ShiftCode
+from ..schemas import OpsClass, ShiftCode
 
 # ---------- shift hours (nominal) ----------
 # (start_offset, end_offset) in minutes from 00:00 of the ops day.
@@ -129,16 +132,30 @@ AWKWARD_ROUTING_MIN: dict[int, tuple[ShiftCode, ...]] = {
 SPACING_HARD_MIN = 15
 SPACING_SOFT_WARN_MIN = 20
 
-# H10 band-targeted relaxation (user direction 2026-05-15).
-# During the six time bands listed below — operationally-dense rush
-# windows — same-staff spacing relaxes to 10 min. Outside these bands
-# the 15-min floor still applies. Each entry is (start_min, end_min)
-# in ops-day minutes, inclusive. Bands are derived from the manual
-# 06-May-2026 allocation's 89 H10 violations (88 of them fall in these
-# six windows; one outlier in the 19:40 band has too few violations to
-# justify expansion).
-SPACING_RELAXED_MIN = 10
-H10_RELAXED_BANDS_MIN: tuple[tuple[int, int], ...] = (
+# H10 (user direction 2026-09-26): the 15-min floor is strict — the
+# 10-min rush-band relaxation of 2026-05-15 is gone — and a domestic
+# flight followed by an international one needs 30 min, so the handler
+# has time to prepare for the INTL departure. INTL→domestic and
+# INTL→INTL keep the plain 15-min floor.
+SPACING_DOM_TO_INTL_MIN = 30
+# H10 (user direction 2026-09-26): one handler can run two P2F flights
+# only when they are at least 30 min apart.
+SPACING_P2F_PAIR_MIN = 30
+#: Widest gap any pair of flights can need — callers scanning a sorted
+#: schedule can stop once two flights are this far apart.
+SPACING_MAX_MIN = max(SPACING_HARD_MIN, SPACING_DOM_TO_INTL_MIN, SPACING_P2F_PAIR_MIN)
+
+#: A flight as the H10 rules see it:
+#: ``(STD in ops-day minutes, is_international, is_p2f)``.
+SpacingKey = tuple[int, bool, bool]
+
+# Operationally-dense rush windows (user direction 2026-05-15). They
+# used to relax H10 to 10 min; now they only drive the solver's
+# "prefer a handler whose shift isn't starting or ending" tiebreaker.
+# Each entry is (start_min, end_min) in ops-day minutes, inclusive.
+# Derived from the manual 06-May-2026 allocation's 89 H10 violations
+# (88 of them fall in these six windows).
+RUSH_BANDS_MIN: tuple[tuple[int, int], ...] = (
     (5 * 60,         5 * 60 + 30),     # 05:00 - 05:30
     (6 * 60 + 55,    7 * 60 + 30),     # 06:55 - 07:30
     (12 * 60 + 55,   13 * 60 + 15),    # 12:55 - 13:15
@@ -148,53 +165,45 @@ H10_RELAXED_BANDS_MIN: tuple[tuple[int, int], ...] = (
 )
 
 
-def is_in_h10_relaxed_band(
+def is_in_rush_band(
     std: time_t, flight_date: date_t, ops_day: date_t,
 ) -> bool:
-    """True if a flight's STD lies in one of the H10-relaxed bands.
-
-    For flights in these bands, same-staff spacing of 10 min is allowed
-    (rather than the 15-min default). Bands are inclusive on both ends.
-
-    Note: the relaxation is applied via the flight's IntervalVar length
-    in the CP-SAT model, so an in-band flight allows 10 min to the
-    chronologically NEXT flight regardless of whether the next flight
-    is also in a band. Cross-band pairs (one in / one out) get the
-    laxer 10 min — a deliberate simplification.
-    """
+    """True if a flight's STD lies in one of the rush bands (inclusive
+    on both ends)."""
     minutes = std_to_ops_day_minutes(std, flight_date, ops_day)
-    return any(lo <= minutes <= hi for lo, hi in H10_RELAXED_BANDS_MIN)
+    return any(lo <= minutes <= hi for lo, hi in RUSH_BANDS_MIN)
 
 
-def spacing_floor_min_for_flight(
-    std: time_t, flight_date: date_t, ops_day: date_t,
-) -> int:
-    """Return ``SPACING_RELAXED_MIN`` (10) if the flight's STD is in an
-    H10-relaxed band, else ``SPACING_HARD_MIN`` (15). Drives the
-    per-flight IntervalVar length in the solver and the post-passes'
-    redistribution H10 guard."""
-    if is_in_h10_relaxed_band(std, flight_date, ops_day):
-        return SPACING_RELAXED_MIN
-    return SPACING_HARD_MIN
+def spacing_key(flight, ops_day: date_t) -> SpacingKey:
+    """``flight``'s :data:`SpacingKey` — anything with ``std``,
+    ``date``, ``is_international`` and ``ops_class`` will do."""
+    return (
+        std_to_ops_day_minutes(flight.std, flight.date, ops_day),
+        bool(flight.is_international),
+        flight.ops_class == OpsClass.P2F,
+    )
 
 
-def _is_in_band_minutes(std_min: int) -> bool:
-    """Minutes-only variant of ``is_in_h10_relaxed_band`` — used by the
-    post-passes where we only track ops-day-minutes (no time / date
-    object) per staff in ``staff_stds``."""
-    return any(lo <= std_min <= hi for lo, hi in H10_RELAXED_BANDS_MIN)
+def required_spacing_min(a: SpacingKey, b: SpacingKey) -> int:
+    """Required min gap between two same-staff flights, in either
+    order: 30 when the earlier one is domestic and the later one
+    international, 30 when both are P2F, else 15."""
+    earlier, later = (a, b) if a[0] <= b[0] else (b, a)
+    gap = SPACING_HARD_MIN
+    if later[1] and not earlier[1]:
+        gap = max(gap, SPACING_DOM_TO_INTL_MIN)
+    if earlier[2] and later[2]:
+        gap = max(gap, SPACING_P2F_PAIR_MIN)
+    return gap
 
 
-def required_spacing_min(std_min_a: int, std_min_b: int) -> int:
-    """Required min gap between two same-staff flights at ``std_min_a``
-    and ``std_min_b`` (ops-day minutes). Returns 10 when BOTH are in
-    relaxed bands, else 15. Matches the solver's per-flight
-    IntervalVar length semantics (gap >= max of the two lengths)."""
-    in_a = _is_in_band_minutes(std_min_a)
-    in_b = _is_in_band_minutes(std_min_b)
-    if in_a and in_b:
-        return SPACING_RELAXED_MIN
-    return SPACING_HARD_MIN
+def spacing_clear(key: SpacingKey, others: Iterable[SpacingKey]) -> bool:
+    """True when a flight keeps the H10 gap to every one of ``others``
+    — the same staff member's other flights."""
+    return all(
+        abs(key[0] - other[0]) >= required_spacing_min(key, other)
+        for other in others
+    )
 
 
 def shift_boundary_within_30min(
@@ -204,7 +213,7 @@ def shift_boundary_within_30min(
     the flight's STD.
 
     Used by the band-targeted "prefer stable shift" soft preference
-    (user direction 2026-05-15): within the H10-relaxed bands, the
+    (user direction 2026-05-15): within the rush bands, the
     solver should prefer to assign a flight to a staff whose shift is
     NOT in transition. A shift is "in transition" at STD T when its
     nominal start or end is within 30 minutes of T.
@@ -222,13 +231,24 @@ def shift_boundary_within_30min(
     minutes = std_to_ops_day_minutes(std, flight_date, ops_day)
     return abs(minutes - start_min) <= 30 or abs(minutes - end_min) <= 30
 
-# H4 P2F buffer (round-3 rewrite): per-handler exclusion windows around
-# each P2F flight's STD. Hardened in eligibility.py's F4. Constants here
-# mirror what's in REF_Constraints H4.
-P2F_HARD_BLOCK_BEFORE_HRS = 3   # ±15 min around STD-3hrs: hard exclusion
-P2F_PARTIAL_BEFORE_HRS = 1      # ±15 min around STD-1hr: max 1 normal flight
-P2F_PARTIAL_AFTER_MIN = 20      # ±15 min around STD+20min: max 1 normal flight
-P2F_WINDOW_HALF_MIN = 15        # half-width of each window
+# H4 P2F buffer (user direction 2026-09-26): a P2F handler takes no
+# normal flights from 2 hrs before to 1 hr after each of their P2F
+# flights' STD, both ends inclusive. Replaces the round-3 D-3hrs ±15
+# hard block and the D-1hr / D+20min ±15 max-1 windows. Enforced as an
+# eligibility filter (eligibility.py F6), so the solver and every
+# post-pass that checks eligibility respect it.
+P2F_BLOCK_BEFORE_MIN = 120
+P2F_BLOCK_AFTER_MIN = 60
+
+
+def in_p2f_block(std_min: int, p2f_std_mins: Iterable[int]) -> bool:
+    """True when a normal flight at ``std_min`` falls inside the
+    no-normal-flight window of any of a handler's P2F flights
+    (``p2f_std_mins``; all in ops-day minutes)."""
+    return any(
+        p - P2F_BLOCK_BEFORE_MIN <= std_min <= p + P2F_BLOCK_AFTER_MIN
+        for p in p2f_std_mins
+    )
 
 # International ±60 min from shift start/end (H12, correction r2-3).
 INTL_SHIFT_EDGE_MIN = 60

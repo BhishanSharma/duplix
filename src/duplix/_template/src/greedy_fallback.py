@@ -22,9 +22,7 @@ Hard rules this DOES still enforce (the ones that are non-negotiable
 even in a degraded mode):
   H1   one staff per flight             — never double-books a flight
   H10  same-staff spacing               — never overlaps/underspaces
-       one person's flights (NORSE-NORSE pairs are exempt, same as
-       the main solver, since a NORSE handler doesn't physically
-       operate the flight)
+       one person's flights
   H16  per-staff hard cap               — never exceeds a staff's max
 
 Hard rules this does NOT enforce (left to the operator to review via
@@ -38,7 +36,7 @@ from __future__ import annotations
 from collections import defaultdict
 from datetime import date as date_t
 
-from ..schemas import FlightInput, OpsClass, StaffMember
+from ..schemas import FlightInput, StaffMember
 from .caps import hard_cap_for
 from .windows import required_spacing_min, std_to_ops_day_minutes
 
@@ -67,8 +65,8 @@ def greedy_allocate(
     staff_by_id = {s.employee_id: s for s in staff}
     caps = {s.employee_id: hard_cap_for(s) for s in staff}
     counts: dict[str, int] = defaultdict(int)
-    # Per-staff list of (std_minutes, is_norse) for H10 spacing checks.
-    assigned_by_staff: dict[str, list[tuple[int, bool]]] = defaultdict(list)
+    # Per-staff list of assigned STD minutes for H10 spacing checks.
+    assigned_by_staff: dict[str, list[int]] = defaultdict(list)
 
     ordered = sorted(
         flights,
@@ -78,7 +76,6 @@ def greedy_allocate(
     assignments: dict[str, str] = {}
     for f in ordered:
         std_min = std_to_ops_day_minutes(f.std, f.date, ops_day)
-        is_norse = f.ops_class == OpsClass.NORSE
         candidates: list[str] = []
         for eid in eligibility.get(f.unique_id, ()):
             if staff_by_id.get(eid) is None:
@@ -87,14 +84,11 @@ def greedy_allocate(
             if cap <= 0 or counts[eid] >= cap:
                 continue
             ok = True
-            if not is_norse:
-                for other_std, other_norse in assigned_by_staff[eid]:
-                    if other_norse:
-                        continue  # NORSE-NORSE pairs skip H10 spacing
-                    lo, hi = min(std_min, other_std), max(std_min, other_std)
-                    if hi - lo < required_spacing_min(lo, hi):
-                        ok = False
-                        break
+            for other_std in assigned_by_staff[eid]:
+                lo, hi = min(std_min, other_std), max(std_min, other_std)
+                if hi - lo < required_spacing_min(lo, hi):
+                    ok = False
+                    break
             if ok:
                 candidates.append(eid)
         if not candidates:
@@ -103,6 +97,6 @@ def greedy_allocate(
         pick = candidates[0]
         assignments[f.unique_id] = pick
         counts[pick] += 1
-        assigned_by_staff[pick].append((std_min, is_norse))
+        assigned_by_staff[pick].append(std_min)
 
     return assignments

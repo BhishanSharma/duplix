@@ -8,7 +8,7 @@ Per user direction 2026-05-22:
       p2f_floor(S),             # 1 if any P2F flight in shift, else 0
   )
 
-No sick/surge buffer (staff handle that operationally). No NORSE / mentor /
+No sick/surge buffer (staff handle that operationally). No mentor /
 pre-planner floor (user direction: only P2F qualifies as a 'must-fill'
 position for the recommender's purpose).
 
@@ -145,7 +145,7 @@ def compute_staffing(
 
     Args:
         flights: iterable of (flight_date, std, ops_class) tuples. ops_class
-                 is a lowercase string ('day', 'night', 'p2f', 'norse',
+                 is a lowercase string ('day', 'night', 'p2f',
                  'ferry', 'test', 'charter', 'gulf'). Gulf flights are
                  filtered out before the math — extract-only.
         assigned_by_shift: {'M': n, 'M1': n, ...} headcount from the roster

@@ -7,9 +7,10 @@ the solver is about to be asked to do.
 
 from __future__ import annotations
 
+from datetime import timedelta
 from typing import Any
 
-from ...schemas import STATUS_TO_P2F_HANDLER_SHIFT, AllocationSheet, OpsClass, Role
+from ...schemas import STATUS_TO_P2F_HANDLER_SHIFT, OpsClass, Role
 from ...state import AppState
 from .common import SHIFTS, canonical_status, is_live, run_date_iso
 
@@ -43,12 +44,12 @@ def read_plan_summary(state: AppState) -> dict[str, Any]:
         for ops, rows in state.cleaned.items():
             flights_by_class[ops.value] = len(rows)
 
-        # Workload-bearing flights only: NORSE has its own handler and
-        # GULF is never allocated, so neither inflates per-shift need.
+        # Workload-bearing flights only: GULF is never allocated, so it
+        # must not inflate per-shift need.
         flights_per_shift: dict[str, int] = {s: 0 for s in SHIFTS}
         p2f_per_shift: dict[str, int] = {"M": 0, "A": 0, "N": 0}
         for ops, rows in state.cleaned.items():
-            if ops in (OpsClass.NORSE, OpsClass.GULF):
+            if ops is OpsClass.GULF:
                 continue
             for r in rows:
                 std_min = r.std.hour * 60 + r.std.minute
@@ -72,10 +73,6 @@ def read_plan_summary(state: AppState) -> dict[str, Any]:
             if handler_shift:
                 nominated_p2f[handler_shift] = True
 
-        norse_nominee_count = sum(
-            1 for row in state.overrides
-            if row.get("type", "").lower() == "norse" and row.get("employee")
-        )
         plan_text = state.plan_text
         run_date = run_date_iso(state)
 
@@ -100,7 +97,6 @@ def read_plan_summary(state: AppState) -> dict[str, Any]:
         }
         for shift in ("M", "A", "N")
     }
-    norse_flights = flights_by_class["norse"]
     day_staff = sum(staff_by_shift[s] for s in ("M", "A", "M1", "A1"))
 
     return {
@@ -113,78 +109,143 @@ def read_plan_summary(state: AppState) -> dict[str, Any]:
         "night_staff_total": staff_by_shift["N"],
         "coverage_by_shift": coverage_by_shift,
         "p2f_bars": p2f_bars,
-        "norse": {
-            "flights": norse_flights,
-            "needed": _ceil_div(norse_flights, 10),
-            "nominated": norse_nominee_count,
-        },
     }
 
 
 def read_handlers(state: AppState) -> dict[str, Any]:
-    """The P2F + NORSE handler picture for the dashboard.
+    """The P2F handler picture for the dashboard — AND whether it's
+    actually enough to allocate on.
 
     P2F handlers come from the roster first (a status like ``M/P2F`` or
-    ``M/P2F/ZC``), with a ``type=p2f`` override row as the manual
-    fallback. NORSE has no roster shorthand — it comes from a
-    ``type=norse`` override, or, failing that, from whoever the engine
-    auto-picked on the NORSE allocations.
+    ``M/P2F/ZC``), with ``type=p2f`` override rows as the manual
+    fallback / addition. An override nomination only counts if the
+    employee is actually on that shift TODAY per the roster — a stale
+    or mistyped shift on the override row (the same mismatch the
+    solver's W212 check catches) is surfaced here as an ``issue``
+    instead of silently looking fine, and does NOT count toward
+    ``valid_count``.
+
+    ``required_by_shift[shift]`` is ``ceil(p2f_flight_count / 8)`` — one
+    handler can only be trusted with 8 P2F flights (W215) — computed
+    from the cleaned schedule, so it's known right after Plan and
+    before Allocate has to run. ``ready`` is True once every shift with
+    P2F flights has at least that many *valid* nominations; the UI (and
+    the run.js Allocate gate) uses this to decide whether Allocate
+    should be clickable.
     """
-    p2f_by_shift: dict[str, dict[str, str]] = {}
-    norse: list[dict[str, str]] = []
+    from ...allocator.windows import SHIFT_NOMINAL_MIN
+    from ...schemas import OpsClass, P2F_HANDLER_ELIGIBLE_SHIFTS
+
+    P2F_HANDLER_CAP = 8
 
     with state.lock:
+        d_day = state.run_date
+
+        shift_today_by_id: dict[str, str] = {}
+        name_to_id: dict[str, str] = {}
+        p2f_nominees: dict[str, list[dict[str, Any]]] = {}
         for av in state.availability:
+            if av.name:
+                name_to_id[av.name.strip().upper()] = av.employee_id
             if not is_live(state, av):
                 continue
+            shift_today_by_id[av.employee_id] = av.current_shift or ""
             status = canonical_status(av.status.value)
             shift = STATUS_TO_P2F_HANDLER_SHIFT.get(status) if status else None
-            if shift and shift not in p2f_by_shift:
-                p2f_by_shift[shift] = {
-                    "name": av.name, "shift": shift,
-                    "role": av.role.value, "source": "roster",
-                }
+            if shift:
+                p2f_nominees.setdefault(shift, []).append({
+                    "name": av.name, "employee_id": av.employee_id,
+                    "shift": shift, "role": av.role.value,
+                    "source": "roster",
+                })
 
+        issues: list[str] = []
         for row in state.overrides:
-            rtype = row.get("type", "").lower()
-            name = row.get("employee", "").strip()
-            if not name:
+            rtype = (row.get("type") or "").lower()
+            if rtype != "p2f":
                 continue
-            if rtype == "p2f":
-                shift = row.get("shift", "").strip().upper()
-                if shift and shift not in p2f_by_shift:
-                    p2f_by_shift[shift] = {
-                        "name": name, "shift": shift,
-                        "role": "", "source": "override",
-                    }
-            elif rtype == "norse":
-                norse.append({"name": name, "source": "override"})
+            name = (row.get("employee") or "").strip()
+            shift = (row.get("shift") or "").strip().upper()
+            if not name or not shift:
+                continue
+            eid = name_to_id.get(name.upper())
+            actual_shift = shift_today_by_id.get(eid) if eid else None
+            if eid is None or actual_shift is None:
+                issues.append(
+                    f'P2F nomination "{name}" ({shift}): not an assignable '
+                    "staff member on today's roster."
+                )
+                continue
+            if actual_shift != shift:
+                issues.append(
+                    f'P2F nomination "{name}" is listed for shift {shift}, '
+                    f"but today's roster has them on {actual_shift or 'OFF'}. "
+                    "Fix the override's shift or nominate someone else."
+                )
+                continue
+            already = any(
+                n["employee_id"] == eid for n in p2f_nominees.get(shift, [])
+            )
+            if not already:
+                p2f_nominees.setdefault(shift, []).append({
+                    "name": name, "employee_id": eid, "shift": shift,
+                    "role": "", "source": "override",
+                })
 
-        # No explicit nomination? Fall back to whoever actually flew the
-        # NORSE flights — the engine auto-picks a non-N ZC and emits a
-        # W213 INFO, and showing "not nominated" made assigners think
-        # their nomination had been ignored.
-        if not norse:
-            seen: set[str] = set()
-            for r in state.allocations:
-                if r.sheet_target is not AllocationSheet.NORSE:
+        # How many P2F flights actually fall in each shift's window —
+        # known from Plan (state.cleaned), no Allocate needed.
+        p2f_count_by_shift: dict[str, int] = {
+            s: 0 for s in P2F_HANDLER_ELIGIBLE_SHIFTS
+        }
+        for row in state.cleaned.get(OpsClass.P2F, []):
+            std_min = row.std.hour * 60 + row.std.minute
+            if row.date and d_day and row.date == d_day + timedelta(days=1):
+                std_min += 24 * 60
+            for shift, (start, end) in SHIFT_NOMINAL_MIN.items():
+                if shift not in P2F_HANDLER_ELIGIBLE_SHIFTS:
                     continue
-                if r.staff_name and r.staff_name not in seen:
-                    seen.add(r.staff_name)
-                    norse.append({"name": r.staff_name, "source": "auto-pick"})
+                if start <= std_min <= end:
+                    p2f_count_by_shift[shift] += 1
+                    break
 
         run_date = run_date_iso(state)
 
+    required_by_shift: dict[str, int] = {}
+    valid_count_by_shift: dict[str, int] = {}
+    shift_status: dict[str, str] = {}
+    for shift in P2F_HANDLER_ELIGIBLE_SHIFTS:
+        count = p2f_count_by_shift.get(shift, 0)
+        needed = -(-count // P2F_HANDLER_CAP) if count else 0  # ceil
+        have = len(p2f_nominees.get(shift, []))
+        required_by_shift[shift] = needed
+        valid_count_by_shift[shift] = have
+        if needed == 0:
+            shift_status[shift] = "not_needed"
+        elif have >= needed:
+            shift_status[shift] = "ok"
+        else:
+            shift_status[shift] = "missing"
+
+    plan_has_run = bool(d_day) and bool(state.cleaned)
+    ready = (not plan_has_run) or all(
+        shift_status[s] != "missing" for s in P2F_HANDLER_ELIGIBLE_SHIFTS
+    )
+
+    all_nominees = [n for shift in p2f_nominees for n in p2f_nominees[shift]]
+
     return {
         "run_date": run_date,
-        "p2f": list(p2f_by_shift.values()),
-        "norse": norse,
-        "missing_p2f_shifts": sorted({"M", "A", "N"} - set(p2f_by_shift)),
-        # "nominated" means an explicit override row. Auto-pick fills the
-        # operational gap but is flagged as such, so the assigner knows
-        # to nominate explicitly if they want someone else.
-        "norse_nominated": any(n["source"] == "override" for n in norse),
-        "norse_auto_picked": any(n["source"] == "auto-pick" for n in norse),
+        "p2f": all_nominees,
+        "missing_p2f_shifts": sorted(
+            s for s, st in shift_status.items() if st == "missing"
+        ),
+        "required_by_shift": required_by_shift,
+        "valid_count_by_shift": valid_count_by_shift,
+        "p2f_flight_count_by_shift": p2f_count_by_shift,
+        "shift_status": shift_status,
+        "issues": issues,
+        "plan_has_run": plan_has_run,
+        "ready": ready,
     }
 
 

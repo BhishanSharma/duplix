@@ -31,9 +31,35 @@ The nominated P2F handler now gets his P2F flights before any normal flight.
   import could not find it) now places every P2F flight before normal ones.
 * Not covered: the P2F post-pass still removes surrounding flights afterwards.
 
+## H20: P2F handlers excluded from international flights (2026-09-26)
+A shift's nominated P2F handler (F4/H4 — the sole person eligible for that
+shift's P2F flights) is now also hard-excluded from every **normal**
+international flight, so his day stays free for more P2F work instead of
+being split between P2F and INTL duty.
+* `allocator/eligibility.py::check` — new filter **F10 (H20)**: if the flight
+  is international, is **not itself a P2F flight**, and
+  `ctx.p2f_handler_by_shift[staff.shift_today] == staff.employee_id`, exclude
+  with `ExcludeReason.P2F_HANDLER_NO_INTL`.
+* **Regression fixed same day:** the first cut of F10 checked
+  `flight.is_international` alone, with no `ops_class` guard. Since a P2F
+  flight can itself be international (e.g. a HAN-CCU rotation), that version
+  also excluded the handler from *his own* P2F leg, leaving it with zero
+  eligible staff and dropping it to Unallocated with a misleading "handler
+  only (H4)" reason. Fixed by adding `flight.ops_class != OpsClass.P2F` to
+  the condition — F4 above already governs who may take the handler's own
+  P2F flights; F10 only ever applies to their normal-duty international
+  flights.
+* Single source of truth: `build_matrix()` calls `check()` for every
+  (flight, staff) pair, and the CP-SAT solver, both greedy fallbacks, and the
+  recommender all consume that same sparse matrix — no other module needed
+  a change to enforce this.
+* Tests: `tests/test_p2f_handler_no_intl.py` (7 cases, including the
+  regression above).
+
 ## Added
-- `tests/` (42 tests), `src/allocator/invariants.py`, `requirements-dev.txt`,
-  pytest config, README "Tests" section, comment/docstring corrections.
+- `tests/` (44 tests, +7 for H20), `src/allocator/invariants.py`,
+  `requirements-dev.txt`, pytest config, README "Tests" section,
+  comment/docstring corrections.
 
 ## Map of `step3_allocate_flights.run()` (for the future split)
 Line numbers are approximate. Suggested stage functions, in order:
@@ -42,7 +68,7 @@ Line numbers are approximate. Suggested stage functions, in order:
 |---|---|
 | 400-612 | read inputs, per-staff and Phase R override sets, D+1 split |
 | 612-630 | pre-solve capacity check (W210) |
-| 630-967 | build eligibility context (P2F / NORSE handlers, staff today) |
+| 630-967 | build eligibility context (P2F handlers, staff today) |
 | 967-1054 | eligibility matrix, zero-eligibility drop (W201), pair generation (W211) |
 | 1054-1139 | day-level workload target, sick-call pinning |
 | 1139-1182 | solve |

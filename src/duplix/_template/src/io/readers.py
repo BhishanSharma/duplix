@@ -34,7 +34,6 @@ from ..schemas import (
     AMRosterRow,
     CrewRosterRow,
     CrewStatus,
-    NORSEHandler,
     P2FNomination,
     PerStaffOverride,
     RaiseCapForFlight,
@@ -745,7 +744,6 @@ def read_am_roster(wb: Workbook, config: Config) -> list[AMRosterRow]:
 # orchestrators never have to discriminate.
 #
 #   type=p2f                → P2FNomination     (date, shift, employee_id)
-#   type=norse              → NORSEHandler      (date, employee_id)
 #   type=max_flights        → PerStaffOverride  (max_flights)
 #   type=cutoff_time        → PerStaffOverride  (std_start / std_cutoff)
 #   type=sick               → employee_id list
@@ -790,7 +788,7 @@ def _resolve_name_to_id(
 ) -> str:
     """Resolve a staff name to an employee_id using the provided map.
     If no map is given, or the name isn't found, return the name as-is —
-    Step 4 will surface a W212/W213 if it can't find that staff in the
+    Step 4 will surface a W212 if it can't find that staff in the
     roster anyway."""
     if not name_to_id:
         return name
@@ -814,24 +812,6 @@ def read_p2f_nominations(
         out.append(P2FNomination(
             date=d_day, shift=s,
             employee_id=_resolve_name_to_id(name, name_to_id),
-        ))
-    return out
-
-
-def read_norse_handlers(
-    overrides: OverrideRows, d_day: date_type,
-    name_to_id: dict[str, str] | None = None,
-) -> list[NORSEHandler]:
-    """Read all rows where ``type=norse``. One NORSEHandler per row
-    (caller asserts at most one)."""
-    from ..schemas import OverrideType
-    out: list[NORSEHandler] = []
-    for row in _rows_of_type(overrides, OverrideType.NORSE.value):
-        name = _row_employee_name(row)
-        if not name:
-            continue
-        out.append(NORSEHandler(
-            date=d_day, employee_id=_resolve_name_to_id(name, name_to_id),
         ))
     return out
 

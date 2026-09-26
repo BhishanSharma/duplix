@@ -105,6 +105,7 @@
 
 .stat-grid-secondary {
   margin-top: 0;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
 }
 
 /* ---- headings that follow content ---- */

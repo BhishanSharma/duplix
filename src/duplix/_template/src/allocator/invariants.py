@@ -8,13 +8,15 @@ of a quietly worse roster.
 
 It is deliberately decoupled from the solver: it only needs rows that carry
 ``date``, ``std``, ``flt``, ``dep``, ``arr`` and ``staff_employee_id``
-(``AllocationRow`` qualifies, so does a ``SimpleNamespace`` in a test).
+(``AllocationRow`` qualifies, so does a ``SimpleNamespace`` in a test),
+plus ``is_international`` and ``sheet_target`` when a row has them.
 
 Rules checked
 -------------
 H1   a flight appears against at most one staff member
-H10  same-staff spacing (15 min, or 10 min when both flights sit in a
-     relaxed band — see ``windows.required_spacing_min``)
+H10  same-staff spacing (15 min, or 30 min for a domestic flight followed
+     by an international one and for two P2F flights — see
+     ``windows.required_spacing_min``)
 H16  per-staff hard cap (only when ``caps`` is supplied)
 
 Rows with an empty ``staff_employee_id`` (pre-plan-only / unallocated) are
@@ -28,10 +30,23 @@ from collections.abc import Collection, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import date as date_t
 
-from .windows import required_spacing_min, std_to_ops_day_minutes
+from .windows import (
+    SPACING_MAX_MIN,
+    SpacingKey,
+    required_spacing_min,
+    std_to_ops_day_minutes,
+)
 
-# Largest gap that can ever be a spacing violation (SPACING_HARD_MIN).
-_MAX_REQUIRED_GAP_MIN = 15
+
+def _spacing_key(row, ops_day: date_t) -> SpacingKey:
+    """A row's H10 identity. Rows carry no ops class, so P2F is read
+    off the lane they were routed to; missing fields read as a plain
+    domestic flight."""
+    return (
+        std_to_ops_day_minutes(row.std, row.date, ops_day),
+        bool(getattr(row, "is_international", False)),
+        str(getattr(row, "sheet_target", "")) == "P2F",
+    )
 
 
 @dataclass(frozen=True)
@@ -88,16 +103,15 @@ def check_allocation(
             )
 
         # ---- H10: spacing (all pairs inside the max window, not just
-        # neighbours: a relaxed 10-min pair can sit next to a 4-min one) ----
-        timed = sorted(
-            ((std_to_ops_day_minutes(r.std, r.date, ops_day), flight_key(r)) for r in flights)
-        )
-        for i, (a_min, a_key) in enumerate(timed):
-            for b_min, b_key in timed[i + 1:]:
-                gap = b_min - a_min
-                if gap >= _MAX_REQUIRED_GAP_MIN:
+        # neighbours: a domestic flight 20 min before an INTL one breaks
+        # the 30-min rule even with a flight in between) ----
+        timed = sorted((_spacing_key(r, ops_day), flight_key(r)) for r in flights)
+        for i, (a, a_key) in enumerate(timed):
+            for b, b_key in timed[i + 1:]:
+                gap = b[0] - a[0]
+                if gap >= SPACING_MAX_MIN:
                     break
-                if gap < required_spacing_min(a_min, b_min):
+                if gap < required_spacing_min(a, b):
                     if frozenset({a_key, b_key}) in waived_pairs:
                         continue
                     violations.append(

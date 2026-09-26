@@ -8,10 +8,16 @@ from src.allocator.invariants import check_allocation, flight_key
 D = date(2026, 5, 1)
 
 
-def row(flt, h, m, emp, dep="DEL", arr="BOM", day=D):
-    return SimpleNamespace(
+def row(flt, h, m, emp, dep="DEL", arr="BOM", day=D, intl=None, sheet=None):
+    r = SimpleNamespace(
         flt=flt, dep=dep, arr=arr, std=time(h, m), date=day, staff_employee_id=emp
     )
+    # Rows without these attributes read as a plain domestic flight.
+    if intl is not None:
+        r.is_international = intl
+    if sheet is not None:
+        r.sheet_target = sheet
+    return r
 
 
 def rules(violations):
@@ -33,29 +39,44 @@ def test_h1_flags_a_flight_owned_twice():
     assert rules(check_allocation(rows, ops_day=D)) == ["H1"]
 
 
-def test_h10_flags_two_flights_under_15_min_outside_bands():
+def test_h10_flags_two_flights_under_15_min():
     rows = [row("6E1", 9, 0, "E1"), row("6E2", 9, 14, "E1")]
     assert rules(check_allocation(rows, ops_day=D)) == ["H10"]
 
 
-def test_h10_allows_exactly_15_min_outside_bands():
+def test_h10_allows_exactly_15_min():
     rows = [row("6E1", 9, 0, "E1"), row("6E2", 9, 15, "E1")]
     assert check_allocation(rows, ops_day=D) == []
 
 
-def test_h10_relaxed_band_allows_10_min_only_when_both_in_band():
-    ok = [row("6E1", 20, 30, "E1"), row("6E2", 20, 40, "E1")]
-    assert check_allocation(ok, ops_day=D) == []
-    too_close = [row("6E1", 20, 30, "E1"), row("6E2", 20, 39, "E1")]
-    assert rules(check_allocation(too_close, ops_day=D)) == ["H10"]
-    one_out = [row("6E1", 22, 0, "E1"), row("6E2", 22, 10, "E1")]  # 22:10 is outside
-    assert rules(check_allocation(one_out, ops_day=D)) == ["H10"]
-
-
-def test_h10_finds_non_adjacent_pair_violations():
-    # a-b fine (10 min, in band), b-c only 4 min: caught; nothing hides behind a neighbour
-    rows = [row("A", 20, 0, "E1"), row("B", 20, 10, "E1"), row("C", 20, 14, "E1")]
+def test_h10_rush_band_no_longer_allows_10_min():
+    rows = [row("6E1", 20, 30, "E1"), row("6E2", 20, 40, "E1")]
     assert rules(check_allocation(rows, ops_day=D)) == ["H10"]
+
+
+def test_h10_domestic_then_intl_needs_30_min():
+    dom = row("6E1", 9, 0, "E1", intl=False)
+    assert rules(check_allocation([dom, row("6E2", 9, 29, "E1", intl=True)], ops_day=D)) == ["H10"]
+    assert check_allocation([dom, row("6E2", 9, 30, "E1", intl=True)], ops_day=D) == []
+
+
+def test_h10_intl_then_domestic_and_intl_pairs_need_15_min():
+    a = row("6E1", 9, 0, "E1", intl=True)
+    assert check_allocation([a, row("6E2", 9, 15, "E1", intl=False)], ops_day=D) == []
+    assert check_allocation([a, row("6E2", 9, 15, "E1", intl=True)], ops_day=D) == []
+
+
+def test_h10_two_p2f_flights_need_30_min():
+    a = row("P1", 9, 0, "E1", sheet="P2F")
+    assert rules(check_allocation([a, row("P2", 9, 29, "E1", sheet="P2F")], ops_day=D)) == ["H10"]
+    assert check_allocation([a, row("P2", 9, 30, "E1", sheet="P2F")], ops_day=D) == []
+    assert check_allocation([a, row("N1", 9, 15, "E1", sheet="DayOps")], ops_day=D) == []
+
+
+def test_h10_checks_every_pair_not_just_neighbours():
+    # B-C is 10 min (under 15) and A-C is a domestic->INTL pair 25 min apart.
+    rows = [row("A", 9, 0, "E1"), row("B", 9, 15, "E1"), row("C", 9, 25, "E1", intl=True)]
+    assert rules(check_allocation(rows, ops_day=D)) == ["H10", "H10"]
 
 
 def test_h10_different_staff_never_conflict():

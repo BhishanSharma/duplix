@@ -26,12 +26,24 @@ Hard constraints NOT encoded here (handled elsewhere):
 Decision variables: ``x[(flight_id, employee_id)] ∈ {0, 1}``, sparse
 over the eligibility matrix. With ~2000 flights × ~95 staff but only
 ~15-25 eligible staff per flight, the variable count is ~40-60k rather
-than ~190k. CP-SAT handles this comfortably under a 60s time budget on
-the sample day per D5.
+than ~190k. CP-SAT handled this comfortably under a 60s time budget on
+the original sample day per D5; the equity objective added since (S1b
+bucket-spread) is considerably harder to prove optimal on a full
+production day, which is why ``configs/config.yml`` budgets up to 700s.
+
+2026-09-26 (speed pass, no change to what counts as an acceptable
+answer): every cold solve — first Plan/Allocate of the day, with no
+prior-run ``solution_hints`` — is now (a) seeded with a cheap greedy
+warm start (see the "Heuristic warm start" block below) so CP-SAT
+begins from a real feasible point instead of nothing, and (b) run with
+``num_search_workers`` explicitly set (see ``_resolve_num_workers``)
+instead of left at the Python binding's default. Both are pure
+wall-clock levers: same ``max_seconds``, same 0%-gap requirement.
 """
 
 from __future__ import annotations
 
+import os
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date as date_t
@@ -40,19 +52,20 @@ from typing import Any
 from ortools.sat.python import cp_model
 
 from ..allocator.caps import hard_cap_for, preferred_target_for
-from ..allocator.eligibility import EligibilityContext, p2f_partial_block_anchors
+from ..allocator.eligibility import EligibilityContext
+from ..allocator.greedy_fallback import greedy_allocate
 from ..allocator.p2f_priority import select_p2f_priority
 from ..allocator.windows import (
     HANDOVER_WINDOW_MIN,
-    P2F_WINDOW_HALF_MIN,
     SHIFT_NOMINAL_MIN,
-    SPACING_HARD_MIN,
+    SPACING_MAX_MIN,
     ZC_BUFFER_END_MIN,
     ZC_BUFFER_START_MIN,
     awkward_eligible_shifts,
-    is_in_h10_relaxed_band,
+    is_in_rush_band,
+    required_spacing_min,
     shift_boundary_within_30min,
-    spacing_floor_min_for_flight,
+    spacing_key,
     std_to_ops_day_minutes,
 )
 from ..schemas import FlightInput, OpsClass, Role, StaffMember
@@ -213,10 +226,10 @@ S_INTL_FAIR_PENALTY = 50
 S_INTL_FAIR_SHIFTS: frozenset[str] = frozenset({"M", "M1", "A", "A1", "N"})
 
 # Patch 2026-05-15 — band-targeted "prefer stable shift" preference.
-# Within the H10-relaxed bands, the solver should prefer staff whose
+# Within the rush bands, the solver should prefer staff whose
 # shift is NOT in transition (nominal start or end within ±30 min of
 # the flight's STD). Implemented as a soft penalty: each (flight,
-# staff) pair where the flight is in a relaxed band AND the staff's
+# staff) pair where the flight is in a rush band AND the staff's
 # shift has a nearby boundary pays this cost.
 #
 # Weight 200 sits above S1-marginal (+1 above = 50, +2 above = 500
@@ -607,7 +620,7 @@ def _build_s_intl_fair_term(
         return 0
     # Bucket staff by shift (skip AM, skip off-day, skip handlers' bucket
     # mixing — handlers are kept in their own bucket to avoid pulling the
-    # min down with a P2F/NORSE who only does INTL incidentally).
+    # min down with a P2F handler who only does INTL incidentally).
     bucket_by_shift: dict[str, list[StaffMember]] = defaultdict(list)
     for s in staff:
         if s.shift_today is None or s.role == Role.AM:
@@ -656,13 +669,13 @@ def _build_s_band_shift_stability_term(
     """Patch 2026-05-15 — band-targeted "prefer stable shift" penalty.
 
     For every (flight, staff) pair where:
-      * the flight's STD lies in an H10-relaxed band
-        (``windows.H10_RELAXED_BANDS_MIN``), AND
+      * the flight's STD lies in a rush band
+        (``windows.RUSH_BANDS_MIN``), AND
       * the staff's shift has its nominal start OR end within ±30 min
         of the flight's STD,
     add a soft penalty of ``S_BAND_SHIFT_STABILITY_PENALTY``.
 
-    Effect: during rush bands (when H10 is relaxed to 10 min), the
+    Effect: during rush bands, the
     solver prefers handlers whose shift is mid-stride — not just
     starting or ending. Staff in handover are still eligible, just
     chosen second.
@@ -673,7 +686,7 @@ def _build_s_band_shift_stability_term(
     """
     terms: list[Any] = []
     for f in flights:
-        if not is_in_h10_relaxed_band(f.std, f.date, ops_day):
+        if not is_in_rush_band(f.std, f.date, ops_day):
             continue
         for s in staff:
             if s.shift_today is None or s.role == Role.AM:
@@ -692,45 +705,23 @@ def _build_s_band_shift_stability_term(
     return sum(terms)
 
 
-def _add_p2f_partial_block_constraints(
-    model: cp_model.CpModel,
-    flights: list[FlightInput],
-    x: dict[tuple[str, str], Any],
-    ctx: EligibilityContext,
-) -> None:
-    """H4 partial windows: max 1 normal flight in the ±15 min windows
-    around (P2F_STD - 1hr) and (P2F_STD + 20min) for each P2F handler.
-    The full hard-block window (D-3hrs) is already filtered by F4 in
-    eligibility; this function adds the soft-blocked max-1 constraints.
+def _resolve_num_workers(configured: int = 0) -> int:
+    """CPU cores to hand CP-SAT for parallel portfolio search.
 
-    2026-05-26 (user direction): ZC+P2F combined handlers (roster cell
-    `M/P2F/ZC` etc.) are skipped here. Their ZC cap is already low
-    (14-15 day / 10-11 night) and applies to regular+P2F combined;
-    stacking the partial buffer windows on top removes too many flights
-    and they end up well below cap. The hard D-3hrs block in F6 still
-    applies — that's briefing time and can't be compressed.
+    Speed-only lever — does not change acceptance criteria. Left unset,
+    CP-SAT's Python bindings do not reliably use every core on every
+    platform/version, so we set this explicitly rather than rely on a
+    default. ``configured`` (from ``configs/config.yml``'s
+    ``solver.num_workers``) overrides auto-detection when > 0; otherwise
+    we use every available core, capped at 8 — OR-Tools' own guidance is
+    that CP-SAT's portfolio search gets most of its benefit from ~8
+    diverse workers, with more mostly costing RAM rather than buying
+    time on problems this size.
     """
-    for handler_id, p2f_anchors in ctx.p2f_flight_minutes_by_handler.items():
-        if not p2f_anchors:
-            continue
-        if handler_id in ctx.zc_p2f_handler_ids:
-            continue
-        before_centers, after_centers = p2f_partial_block_anchors(p2f_anchors)
-        for centers in (before_centers, after_centers):
-            for center in centers:
-                window_vars = []
-                for f in flights:
-                    if f.ops_class == OpsClass.P2F:
-                        continue
-                    if (f.unique_id, handler_id) not in x:
-                        continue
-                    std_min = std_to_ops_day_minutes(
-                        f.std, f.date, ctx.ops_day,
-                    )
-                    if abs(std_min - center) <= P2F_WINDOW_HALF_MIN:
-                        window_vars.append(x[(f.unique_id, handler_id)])
-                if window_vars:
-                    model.add(sum(window_vars) <= 1)
+    if configured and configured > 0:
+        return configured
+    cores = os.cpu_count() or 4
+    return max(1, min(cores, 8))
 
 
 def solve_allocation(
@@ -740,6 +731,7 @@ def solve_allocation(
     *,
     ops_day: date_t,
     max_seconds: int = 60,
+    num_workers: int = 0,
     enable_s1_count_balance: bool = False,
     enable_s3_heavy_spread: bool = False,
     enable_s4_pair_stability: bool = False,
@@ -761,13 +753,12 @@ def solve_allocation(
 
     With all soft-objective flags False (default), the solver returns
     the first feasible assignment that satisfies H1, H10, H16, and (if
-    ``elig_ctx`` provides P2F handler info) the H4 partial-block
-    constraints. With soft flags enabled, it minimizes the chosen
-    weighted sum.
+    ``elig_ctx`` provides P2F handler info) H17 and the P2F-first
+    reservations. With soft flags enabled, it minimizes the chosen
+    weighted sum. The H4 P2F buffer is already in ``eligibility``.
 
     Pass ``elig_ctx`` (the same one used to build the eligibility
-    matrix) so the solver can apply the H4 partial-block max-1
-    constraints around the handler's D-1hr and D+20min windows.
+    matrix) so the solver knows the P2F handlers.
 
     ``hard_bucket_spread_max``, if set (2026-09-23), turns the H18
     same-(shift, role) spread into a HARD ceiling: no bucket may have
@@ -849,48 +840,31 @@ def solve_allocation(
             else:
                 unassigned_indicators.append(ind)
 
-    # ---- H10: per-staff same-flight spacing, band-aware + waiver-aware ----
+    # ---- H10: per-staff same-flight spacing, waiver-aware ----
     # Replaces the prior model.add_no_overlap formulation. For every pair
     # of flights eligible to the same staff with gap < required spacing
-    # (10 in relaxed bands when both flights are in a band, else 15),
-    # add an at-most-one constraint UNLESS the operator waived this pair
-    # via an override of type=waive_h10_pair.
-    from ..allocator.windows import required_spacing_min as _required_spacing
-    from ..schemas import OpsClass as _OC_h10
+    # (15 min, or 30 for domestic→INTL and for two P2F flights), add an
+    # at-most-one constraint UNLESS the operator waived this pair via an
+    # override of type=waive_h10_pair.
     n_h10_pairs = 0
     n_h10_waived = 0
-    n_h10_norse_skipped = 0
     for emp_id, emp_flights in flights_by_staff.items():
         if len(emp_flights) < 2:
             continue
         # Sort by STD so we iterate close-in-time pairs first.
-        with_min = sorted(
-            (
-                (std_to_ops_day_minutes(f.std, f.date, ops_day), f)
-                for f in emp_flights
-            ),
-            key=lambda t: t[0],
+        with_key = sorted(
+            ((spacing_key(f, ops_day), f) for f in emp_flights),
+            key=lambda t: t[0][0],
         )
-        for i in range(len(with_min)):
-            std_i, fi = with_min[i]
-            for j in range(i + 1, len(with_min)):
-                std_j, fj = with_min[j]
-                gap = std_j - std_i
-                floor = _required_spacing(std_i, std_j)
-                if gap >= floor:
+        for i in range(len(with_key)):
+            key_i, fi = with_key[i]
+            for j in range(i + 1, len(with_key)):
+                key_j, fj = with_key[j]
+                gap = key_j[0] - key_i[0]
+                if gap >= SPACING_MAX_MIN:
                     # Pairs from here on are even further apart (sorted).
                     break
-                # 2026-05-24 (user direction): NORSE flights skip H10
-                # entirely. The NORSE handler doesn't physically
-                # operate the flight — they batch-email pax loads for
-                # all NORSE legs together in a few minutes. So one
-                # handler can hold any number of NORSE flights AND
-                # also take regular flights right alongside them —
-                # there's no physical handover that needs the 15-min
-                # gap. Skip H10 if EITHER side of the pair is NORSE.
-                if (fi.ops_class == _OC_h10.NORSE
-                        or fj.ops_class == _OC_h10.NORSE):
-                    n_h10_norse_skipped += 1
+                if gap >= required_spacing_min(key_i, key_j):
                     continue
                 # Phase R waiver check. Order-insensitive — both
                 # (uid_a, uid_b, emp) and (uid_b, uid_a, emp) accepted.
@@ -904,11 +878,6 @@ def solve_allocation(
                     x[(fi.unique_id, emp_id)] + x[(fj.unique_id, emp_id)] <= 1
                 )
                 n_h10_pairs += 1
-    if n_h10_norse_skipped:
-        # Plain ASCII to survive Windows cp1252 console encoding
-        # (Unicode arrows like ↔ raise UnicodeEncodeError on the
-        # default stdout encoder).
-        print(f"  H10: skipped {n_h10_norse_skipped} NORSE-NORSE pair(s) (no physical handover)")
     if waive_h10_triples:
         print(
             f"  H10 pairwise: {n_h10_pairs} forbidden, "
@@ -921,16 +890,13 @@ def solve_allocation(
     # Per user direction 2026-05-10: people on the same shift+role
     # should get the same number of flights "as much as possible".
     # We add a HARD constraint: within each (shift, role) bucket,
-    # max(actual) - min(actual) <= 2. Handlers (P2F + NORSE) are
+    # max(actual) - min(actual) <= 2. P2F handlers are
     # EXCLUDED — their workload mix differs (handler flights count
     # differently per the cap rules) and they'd otherwise drag the
     # min down and force everyone else under their target.
-    p2f_handler_set_for_spread: set[str] = set()
-    norse_handler_set_for_spread: set[str] = set()
+    excluded_handlers: set[str] = set()
     if elig_ctx is not None:
-        p2f_handler_set_for_spread = set(elig_ctx.p2f_handler_by_shift.values())
-        norse_handler_set_for_spread = set(elig_ctx.norse_handler_ids)
-    excluded_handlers = p2f_handler_set_for_spread | norse_handler_set_for_spread
+        excluded_handlers = set(elig_ctx.p2f_handler_by_shift.values())
     spread_groups: dict[tuple[str, Role], list[StaffMember]] = defaultdict(list)
     for s in staff:
         if s.shift_today is None or s.role == Role.AM:
@@ -1136,32 +1102,20 @@ def solve_allocation(
     #     limit (ZC=16, STAFF=24, etc.) — this naturally keeps them
     #     at or below the workload of non-handler peers since their
     #     P2F flights eat into the cap.
-    #   NORSE flights are EXEMPT from the NORSE handler's cap. NORSE
-    #     work goes on top of the regular cap.
-    norse_handler_set: set[str] = set()
-    if elig_ctx is not None:
-        norse_handler_set = set(elig_ctx.norse_handler_ids)
 
     for emp_id in flights_by_staff:
         cap = hard_cap_for(staff_by_id[emp_id])
-        is_norse_handler = emp_id in norse_handler_set
         # Phase R: ``raise_cap_uids`` lets the operator nominate one
         # specific (flight, staff) pair to land OUTSIDE the H16 cap.
-        # Effectively "this flight is on top of cap" — same semantic as
-        # NORSE exemption for the NORSE handler.
+        # Effectively "this flight is on top of cap".
         emp_vars = [
             x[(f.unique_id, emp_id)]
             for f in flights
             if (f.unique_id, emp_id) in x
-            and not (is_norse_handler and f.ops_class == _OpsClass.NORSE)
             and (f.unique_id, emp_id) not in raise_cap_uids
         ]
         if emp_vars:
             model.add(sum(emp_vars) <= cap)
-
-    # ---- H4 partial blocks (P2F handler ±15 min around D-1hr / D+20min) ----
-    if elig_ctx is not None:
-        _add_p2f_partial_block_constraints(model, flights, x, elig_ctx)
 
     # ---- P2F first: reserve each handler's P2F flights ----
     # 2026-09-22 (user direction): the nominated P2F handler must get his
@@ -1248,7 +1202,7 @@ def solve_allocation(
         if fair_term is not None:
             obj_terms.append(fair_term)
     # Patch 2026-05-15 — band-targeted "prefer stable shift" within
-    # the H10-relaxed bands.
+    # the rush bands.
     if enable_s_band_shift_stability:
         stability_term = _build_s_band_shift_stability_term(
             flights, staff, x, ops_day,
@@ -1300,6 +1254,8 @@ def solve_allocation(
     # eligible (e.g. an override removed that staff's slot), the solver
     # silently ignores that hint and searches normally.
     n_hints_applied = 0
+    n_caller_hints = 0
+    hinted_fids: set[str] = set()
     if solution_hints:
         for fid, eid in solution_hints.items():
             target = x.get((fid, eid))
@@ -1307,11 +1263,59 @@ def solve_allocation(
                 continue
             model.add_hint(target, 1)
             n_hints_applied += 1
-        if n_hints_applied:
+            n_caller_hints += 1
+            hinted_fids.add(fid)
+        if n_caller_hints:
             print(
-                f"  solver: warm-start with {n_hints_applied} solution "
+                f"  solver: warm-start with {n_caller_hints} solution "
                 f"hints (of {len(solution_hints)} requested)"
             )
+
+    # ---- Heuristic warm start for genuinely cold solves (speed only) ----
+    # A caller-supplied ``solution_hints`` (above) comes from a PRIOR
+    # CP-SAT solve, so high coverage of it is a trustworthy near-optimal
+    # upper bound — that's what earns the aggressive 200s/5%-gap
+    # "re-solve mode" below. A first-ever Plan/Allocate for the day has
+    # no such hints and CP-SAT starts its search from nothing, spending
+    # real time just to find ANY feasible point before it can start
+    # improving. We close that gap with a cheap greedy seed (H1/H10/H16
+    # only — allocator/greedy_fallback.py) for whatever flights the
+    # caller didn't already hint.
+    #
+    # This is deliberately NOT allowed to change the acceptance bar: it
+    # is excluded from the ``n_caller_hints`` count used by the re-solve
+    # gate just below, so a cold solve still gets the full max_seconds
+    # budget and the full (0%-gap / proven-optimal-or-timeout) standard —
+    # it just starts the search from a much better point, which tends to
+    # improve both how fast a good answer is found AND how good the
+    # answer is if the clock does run out.
+    if n_caller_hints < max(1, len(flights) // 2):
+        # Also skip anything already pinned (hard-fixed) above — hinting
+        # a different staff there would just be a contradictory no-op.
+        pinned_fids = set(pinned_assignments) if pinned_assignments else set()
+        remaining_flights = [
+            f for f in flights
+            if f.unique_id not in hinted_fids and f.unique_id not in pinned_fids
+        ]
+        if remaining_flights:
+            greedy_seed = greedy_allocate(
+                remaining_flights, staff, eligibility, ops_day=ops_day,
+            )
+            n_greedy_applied = 0
+            for fid, eid in greedy_seed.items():
+                target = x.get((fid, eid))
+                if target is None:
+                    continue
+                model.add_hint(target, 1)
+                n_hints_applied += 1
+                n_greedy_applied += 1
+            if n_greedy_applied:
+                print(
+                    f"  solver: cold-solve warm start — seeded "
+                    f"{n_greedy_applied} greedy-heuristic hint(s) for "
+                    f"{len(remaining_flights)} unhinted flight(s) (speed "
+                    "only; does not relax the optimality bar)"
+                )
 
     # ---- Solve ----
     # Per user direction 2026-05-11: time budget removed — solver runs
@@ -1320,6 +1324,10 @@ def solve_allocation(
     solver = cp_model.CpSolver()
     if max_seconds and max_seconds > 0:
         solver.parameters.max_time_in_seconds = float(max_seconds)
+    # Parallel portfolio search — pure speed lever, see
+    # _resolve_num_workers docstring. Does not change what counts as an
+    # acceptable answer.
+    solver.parameters.num_search_workers = _resolve_num_workers(num_workers)
     # 2026-05-24: keep stochastic search by design. A previous attempt
     # to pin random_seed=42 backfired — user pointed out: if 42 happens
     # to be unlucky for a given problem, every re-run produces the same
@@ -1336,18 +1344,21 @@ def solve_allocation(
     # would be operationally pointless.
     #
     # Two-tier behavior:
-    #   * n_hints_applied >= 50% of total flights → "re-solve mode":
+    #   * n_caller_hints >= 50% of total flights → "re-solve mode":
     #     cap wall-clock at 200s AND accept 5% gap. Sick / recommender
     #     re-solves complete in 30-60s typical (vs 700s cold) because
     #     CP-SAT proves the warm-started solution near-optimal fast.
     #   * Fewer hints → "cold-solve mode": full max_seconds, full proof.
-    if n_hints_applied >= max(1, len(flights) // 2):
+    # Gated on ``n_caller_hints`` (genuine prior-solution hints) only —
+    # the greedy heuristic seed above is not a trustworthy upper bound
+    # on the objective and must never trigger the relaxed gap/time cap.
+    if n_caller_hints >= max(1, len(flights) // 2):
         solver.parameters.relative_gap_limit = 0.05
         prev_max = solver.parameters.max_time_in_seconds
         if prev_max <= 0 or prev_max > 200.0:
             solver.parameters.max_time_in_seconds = 200.0
         print(
-            f"  solver: re-solve mode — warm-start has {n_hints_applied} "
+            f"  solver: re-solve mode — warm-start has {n_caller_hints} "
             f"hints of {len(flights)} flights; capped at 200s + 5% gap "
             f"(was {prev_max:.0f}s full budget)"
         )

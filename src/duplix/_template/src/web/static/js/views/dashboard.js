@@ -35,7 +35,6 @@ const HEADLINE_STATS = {
   "ds-day-ops": "day_ops",
   "ds-night-ops": "night_ops",
   "ds-p2f": "p2f",
-  "ds-norse": "norse",
   "ds-special-ops": "special_ops",
   "ds-special-ops-test": "special_ops_test",
   "ds-special-ops-ferry": "special_ops_ferry",
@@ -64,7 +63,6 @@ export const template = `
     ${statCard("ds-day-ops", "Day Ops to plan")}
     ${statCard("ds-night-ops", "Night Ops to plan")}
     ${statCard("ds-p2f", "P2F to plan")}
-    ${statCard("ds-norse", "NORSE to plan")}
     <div class="stat-card">
       <div class="stat-value" id="ds-special-ops">—</div>
       <div class="stat-label">Special Ops to plan</div>
@@ -77,6 +75,9 @@ export const template = `
       </div>
     </div>
   </div>
+
+  ${planPanel.template}
+  ${handlersPanel.template}
 
   <div class="block" id="ds-charts-block">
     <div class="ds-chart-pair">
@@ -111,8 +112,7 @@ export const template = `
         <aside class="ds-chart-cell handler-assign" aria-labelledby="handler-assign-title">
           <h2 id="handler-assign-title">Handler Assign</h2>
           <p class="subdued">Search a staff member and nominate them as
-            the P2F handler for a shift (M / A / N) or as the NORSE
-            handler. Applies right away.</p>
+            the P2F handler for a shift (M / A / N). Applies right away.</p>
           <input id="handler-assign-search" type="search" placeholder="Search person" aria-label="Search staff to nominate">
           <div id="handler-assign-list"></div>
         </aside>
@@ -138,8 +138,6 @@ export const template = `
     <div id="ds-roster" class="roster-by-shift"></div>
   </div>
 
-  ${planPanel.template}
-  ${handlersPanel.template}
   ${staffingPanel.template}
 
   <div class="block">

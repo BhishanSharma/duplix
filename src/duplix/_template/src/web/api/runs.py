@@ -58,6 +58,30 @@ def register(router: Router) -> None:
                 "missing": missing,
             })
 
+        # Belt-and-suspenders: the dashboard is expected to grey out
+        # Allocate until P2F handlers are sorted (see plan.js /
+        # handlers.js), but a direct API call — or a stale tab — could
+        # still reach here. Only blocks when Plan has already run for
+        # this date (same date requested) with a real gap; never blocks
+        # the "all" step's own Plan phase when nothing's been planned
+        # yet, since that will surface the same gap in the Warnings tab
+        # after the solve.
+        if step in ("all", "step3") and d_day == STATE.run_date:
+            from .. import readback
+            handlers_state = readback.read_handlers(STATE)
+            if handlers_state.get("plan_has_run") and not handlers_state.get("ready"):
+                missing_shifts = handlers_state.get("missing_p2f_shifts", [])
+                return conflict({
+                    "error": (
+                        "P2F handler nomination missing or invalid for "
+                        f"shift(s): {', '.join(missing_shifts)}. Fix it in "
+                        "the Override drawer, then Plan again before "
+                        "Allocate."
+                    ),
+                    "missing_p2f_shifts": missing_shifts,
+                    "issues": handlers_state.get("issues", []),
+                })
+
         STATE.run_date = d_day
         if not runner.trigger(STATE, d_day, step):
             return conflict({"error": "another run is in progress"})

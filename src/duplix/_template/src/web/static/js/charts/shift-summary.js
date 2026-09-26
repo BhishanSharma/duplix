@@ -9,7 +9,7 @@
  *   T/F/C TEST + FERRY + CHARTER bundled
  *   Other regular domestic-to-domestic
  * An intl-to-intl flight counts as I2D, following the engine's
- * DEP-wins convention. NORSE is excluded — it's its own track.
+ * DEP-wins convention.
  */
 
 import { $ } from "../core/dom.js";
@@ -47,7 +47,6 @@ export function render(wlRows, allocRows, shiftByStaff) {
   }
 
   for (const r of allocRows) {
-    if ((r.ops_class || "").toLowerCase() === "norse") continue;
     const bucket = agg[shiftByStaff[(r.staff || "").trim()]];
     if (!bucket) continue;
     bucket.flights++;
@@ -93,7 +92,7 @@ export function render(wlRows, allocRows, shiftByStaff) {
       <tbody>${rows}</tbody>
     </table>
     <p class="subdued shift-summary-hint">
-      <strong>Flights</strong> = P2F + I2D + D2I + T/F/C + Other (NORSE excluded).
+      <strong>Flights</strong> = P2F + I2D + D2I + T/F/C + Other.
       <strong>I2D</strong> = DEP international, ARR domestic.
       <strong>D2I</strong> = DEP domestic, ARR international.
       <strong>T/F/C</strong> = TEST + FERRY + CHARTER bundled.

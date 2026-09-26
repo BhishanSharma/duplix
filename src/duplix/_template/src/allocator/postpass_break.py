@@ -1,8 +1,9 @@
 """Floating-break post-pass (2026-09-23, soft / best-effort).
 
-Gives each on-shift staff member a floating 45-minute break somewhere
-mid-shift, WITHOUT changing anyone's flight count — it only performs
-1-for-1 SWAPS between staff in the same (shift, role) bucket. Because
+Gives each on-shift staff member a floating break somewhere mid-shift
+(``break_pass.length_minutes`` in config.yml, 30 min by default),
+WITHOUT changing anyone's flight count — it only performs 1-for-1
+SWAPS between staff in the same (shift, role) bucket. Because
 a swap is always "I give you one flight, you give me one flight",
 both people's totals are unchanged, so the workload spread that H18 /
 ``postpass_rebalance`` already achieved is left completely intact.
@@ -32,6 +33,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import date as date_t
 
+from ..config import BREAK_MINUTES_DEFAULT
 from ..schemas import (
     AllocationRow,
     FlightInput,
@@ -43,11 +45,14 @@ from ..schemas import (
 from .eligibility import sheet_target_for
 from .windows import (
     SHIFT_NOMINAL_MIN,
-    required_spacing_min,
+    SpacingKey,
+    spacing_clear,
+    spacing_key,
     std_to_ops_day_minutes,
 )
 
-BREAK_LEN_MIN = 45
+# Default only — the Allocate run passes the configured length.
+BREAK_LEN_MIN = BREAK_MINUTES_DEFAULT
 # Keep the break out of the first/last hour of the shift so it reads as
 # a genuine mid-shift break, not a shift-boundary artifact.
 EDGE_MARGIN_MIN = 60
@@ -63,7 +68,7 @@ def _fmt(ops_min: int) -> str:
 @dataclass
 class BreakSummary:
     n_staff_considered: int = 0
-    n_clean: int = 0            # already had a natural >=45min gap
+    n_clean: int = 0            # already had a natural break-length gap
     n_created_via_swap: int = 0  # fully cleared via 1+ swaps
     n_partial: int = 0          # some conflicts swapped, some left
     n_not_found: int = 0        # no window could be cleared at all
@@ -79,11 +84,11 @@ class BreakSummary:
 
 
 def _transferable(flight: FlightInput | None) -> bool:
-    """Only plain-domestic flights are swap candidates — P2F/NORSE
-    routing is dedicated to specific handlers and isn't touched here."""
+    """Only plain-domestic flights are swap candidates — P2F routing
+    is dedicated to specific handlers and isn't touched here."""
     if flight is None:
         return False
-    return flight.ops_class not in (OpsClass.P2F, OpsClass.NORSE)
+    return flight.ops_class != OpsClass.P2F
 
 
 def _best_window(
@@ -146,8 +151,8 @@ def apply_break_pass(
             "sheet_target": r.sheet_target,
         }
 
-    # Per-staff sorted STD list + a quick uid lookup by (staff, std).
-    staff_stds: dict[str, list[int]] = defaultdict(list)
+    # Per-staff SpacingKey list + a quick uid lookup by (staff, std).
+    staff_stds: dict[str, list[SpacingKey]] = defaultdict(list)
     uid_by_staff_std: dict[tuple[str, int], list[str]] = defaultdict(list)
     for uid, st in rstate.items():
         if not st["staff_id"]:
@@ -155,8 +160,9 @@ def apply_break_pass(
         f_ref = flight_by_uid.get(uid)
         if f_ref is None:
             continue
-        m = std_to_ops_day_minutes(f_ref.std, f_ref.date, d_day)
-        staff_stds[st["staff_id"]].append(m)
+        key = spacing_key(f_ref, d_day)
+        m = key[0]
+        staff_stds[st["staff_id"]].append(key)
         uid_by_staff_std[(st["staff_id"], m)].append(uid)
 
     buckets: dict[tuple[ShiftCode, Role], list[StaffMember]] = defaultdict(list)
@@ -167,13 +173,13 @@ def apply_break_pass(
 
     assigned_break: dict[str, tuple[int, int]] = {}
 
-    def _spacing_ok(staff_id: str, new_std: int, skip_std: int | None = None) -> bool:
-        for std in staff_stds.get(staff_id, ()):
-            if skip_std is not None and std == skip_std:
-                continue
-            if abs(std - new_std) < required_spacing_min(std, new_std):
-                return False
-        return True
+    def _spacing_ok(
+        staff_id: str, new_key: SpacingKey, skip_std: int | None = None,
+    ) -> bool:
+        return spacing_clear(new_key, (
+            k for k in staff_stds.get(staff_id, ())
+            if skip_std is None or k[0] != skip_std
+        ))
 
     def _during_break(staff_id: str, std: int) -> bool:
         win = assigned_break.get(staff_id)
@@ -189,12 +195,14 @@ def apply_break_pass(
         recip_a = staff_by_id[staff_b]  # receives uid_a
         recip_b = staff_by_id[staff_a]  # receives uid_b
 
+        entry_a = spacing_key(f_a, d_day)
+        entry_b = spacing_key(f_b, d_day)
         with contextlib.suppress(ValueError):
-            staff_stds[staff_a].remove(std_a)
+            staff_stds[staff_a].remove(entry_a)
         with contextlib.suppress(ValueError):
-            staff_stds[staff_b].remove(std_b)
-        staff_stds[staff_a].append(std_b)
-        staff_stds[staff_b].append(std_a)
+            staff_stds[staff_b].remove(entry_b)
+        staff_stds[staff_a].append(entry_b)
+        staff_stds[staff_b].append(entry_a)
 
         st_a["staff_id"], st_a["staff_name"] = recip_a.employee_id, recip_a.name
         st_a["sheet_target"] = sheet_target_for(f_a, recip_a)
@@ -211,7 +219,9 @@ def apply_break_pass(
         hi = nominal[1] - edge_margin
         for s in sorted(bucket, key=lambda x: x.name):
             summary.n_staff_considered += 1
-            window = _best_window(staff_stds.get(s.employee_id, []), lo, hi, break_len)
+            window = _best_window(
+                [k[0] for k in staff_stds.get(s.employee_id, [])], lo, hi, break_len,
+            )
             if window is None:
                 summary.n_not_found += 1
                 summary.log(
@@ -254,7 +264,7 @@ def apply_break_pass(
                         continue
                     if _during_break(peer.employee_id, conflict_std):
                         continue
-                    if not _spacing_ok(peer.employee_id, conflict_std):
+                    if not _spacing_ok(peer.employee_id, spacing_key(f, d_day)):
                         continue
                     # Find a plain-domestic flight of peer's, outside s's
                     # break window, that s is eligible for and that fits
@@ -276,7 +286,10 @@ def apply_break_pass(
                             continue  # would just create a new conflict
                         if s.employee_id not in matrix.get(g_uid, set()):
                             continue
-                        if not _spacing_ok(s.employee_id, g_std, skip_std=conflict_std):
+                        if not _spacing_ok(
+                            s.employee_id, spacing_key(g, d_day),
+                            skip_std=conflict_std,
+                        ):
                             continue
                         _do_swap(donor_uid, s.employee_id, g_uid, peer.employee_id)
                         summary.n_swaps += 1

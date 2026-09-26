@@ -36,14 +36,14 @@
 }
 .drawer-section form input[type="text"]#intl-airport-name { width: 220px; }
 .drawer-section form button { align-self: flex-end; }
-.intl-airport-status {
+.form-status {
   flex-basis: 100%;
   font-size: 12px;
   color: var(--subdued);
   min-height: 16px;
 }
-.intl-airport-status.ok  { color: var(--ok); }
-.intl-airport-status.err { color: var(--danger); }
+.form-status.ok  { color: var(--ok); }
+.form-status.err { color: var(--danger); }
 .sl-current {
   flex-basis: 100%;
   font-size: 12px;

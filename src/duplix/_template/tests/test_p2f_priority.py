@@ -12,9 +12,10 @@ D = date(2026, 5, 1)
 H = "H1"  # the nominated P2F handler
 
 
-def flight(uid, h, m, ops_class=OpsClass.P2F):
+def flight(uid, h, m, ops_class=OpsClass.P2F, intl=False):
     return SimpleNamespace(
-        unique_id=uid, date=D, std=time(h, m), ops_class=ops_class
+        unique_id=uid, date=D, std=time(h, m), ops_class=ops_class,
+        is_international=intl,
     )
 
 
@@ -35,11 +36,18 @@ def test_reserves_p2f_for_handler_and_ignores_normal_flights():
     assert skipped == []
 
 
-def test_p2f_flights_closer_than_h10_are_not_both_reserved():
-    fl = [flight("P1", 9, 0), flight("P2", 9, 10)]  # 10 min apart, outside band
+def test_p2f_flights_under_30_min_apart_are_not_both_reserved():
+    fl = [flight("P1", 9, 0), flight("P2", 9, 29)]
     reserved, skipped = select(fl, {"P1": {H}, "P2": {H}})
     assert reserved == {"P1": H}
     assert [u for u, _ in skipped] == ["P2"]
+
+
+def test_p2f_flights_30_min_apart_are_both_reserved():
+    fl = [flight("P1", 9, 0), flight("P2", 9, 30)]
+    reserved, skipped = select(fl, {"P1": {H}, "P2": {H}})
+    assert reserved == {"P1": H, "P2": H}
+    assert skipped == []
 
 
 def test_waived_h10_pair_can_both_be_reserved():

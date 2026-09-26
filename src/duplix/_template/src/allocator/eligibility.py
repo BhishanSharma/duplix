@@ -14,24 +14,23 @@ Hard constraints enforced HERE:
        shift are eligible in the (nominal_end, nominal_end+30] window;
        solver picks via S1+S5)
   H3   P2F license match
-  H4   P2F dedication + 3-window buffer (D-3hrs hard exclusion;
-       D-1hr / D+20min max-1)
+  H4   P2F dedication + buffer (no normal flights for the handler
+       from STD-2hrs to STD+1hr of each of their P2F flights)
   H11  per-day overrides (STD cutoff, max_flights via H16 cap)
   H12  international newbie + shift-edge exclusions
   H13  AM exclusion
+  H20  nominated P2F handlers never take international flights (frees
+       up their day for more P2F work)
 
 Hard constraints NOT enforced here (deferred to the solver):
   H1   exactly one staff per flight       — solver objective
-  H10  15-min spacing (10 in relaxed bands) — solver at-most-one pairs
+  H10  15-min spacing (30 domestic→INTL)  — solver at-most-one pairs
   H16  hard caps                          — solver constraint
 
 Hard constraints removed in round-3 (now SOFT, handled in the solver):
   H7   handover window (was tail-ext hard)        — soft via S5
   H9   ZC report buffers (was hard exclusion)     — soft via S7
   H15  awkward routing (was hard pre-filter)      — soft via S6
-
-Hard constraints removed entirely in round-3:
-  H5   NORSE handler ±60 min buffer               — dropped
 """
 
 from __future__ import annotations
@@ -50,12 +49,9 @@ from ..schemas import (
     StaffMember,
 )
 from .windows import (
-    P2F_HARD_BLOCK_BEFORE_HRS,
-    P2F_PARTIAL_AFTER_MIN,
-    P2F_PARTIAL_BEFORE_HRS,
-    P2F_WINDOW_HALF_MIN,
     SHIFT_NOMINAL_MIN,
     awkward_eligible_shifts,
+    in_p2f_block,
     is_in_std_window,
     std_to_ops_day_minutes,
 )
@@ -105,11 +101,8 @@ class ExcludeReason(StrEnum):
     P2F_NOT_LICENSED = "P2F flight requires P2F license (H3)"
     P2F_NOT_HANDLER = "P2F flight only goes to shift's nominated handler (H4)"
     P2F_HANDLER_HARD_BLOCK = (
-        "normal flight in handler's D-3hrs ±15min window — hard block (H4)"
-    )
-    NORSE_NOT_HANDLER = (
-        "NORSE flight only goes to nominated NORSE handler(s) "
-        "(per user direction 2026-05-10)"
+        "normal flight within 2 hrs before / 1 hr after one of the "
+        "handler's P2F flights (H4)"
     )
     OUT_OF_SHIFT = "STD outside shift's distribution window (user 2026-05-12)"
     STD_OUTSIDE_ALL_WINDOWS = "STD outside all shift windows"
@@ -119,6 +112,9 @@ class ExcludeReason(StrEnum):
     INTL_SHIFT_COVERAGE = (
         "international DEP: handler's shift does not cover D-75 through "
         "STD (Change 4 — same handler start-to-finish)"
+    )
+    P2F_HANDLER_NO_INTL = (
+        "nominated P2F handlers do not take international flights (H20)"
     )
 
 
@@ -136,34 +132,13 @@ class EligibilityContext:
 
     p2f_flight_minutes_by_handler: dict[str, list[int]] = field(default_factory=dict)
     """employee_id -> list of P2F flight STDs (in ops-day minutes) the
-    handler is dedicated to. Drives H4's three buffer windows."""
-
-    norse_handler_ids: tuple[str, ...] = ()
-    """Nominated NORSE handlers. When non-empty, NORSE flights are
-    eligible ONLY for these employees (hard constraint per user direction
-    2026-05-10 — all NORSE work concentrated on the nominated handler[s];
-    if more than ~10 flights, multiple nominees split the load).
-    Empty tuple = no nomination = NORSE flight eligible for any staff
-    on shift (graceful fallback)."""
+    handler is dedicated to. Drives H4's no-normal-flight window."""
 
     # Phase R per-flight overrides — populated by step3 from the override list
     # rows of type ``skip_p2f_buffer``. Each entry is (flight_key,
     # employee_id) where flight_key = ``f"{flt}|{std.isoformat()}"``.
     # When present, F6 skips the P2F buffer check for that exact pair.
     skip_p2f_buffer_pairs: frozenset[tuple[str, str]] = frozenset()
-
-    # 2026-05-26 (user direction): employee_ids of staff who hold BOTH
-    # roles for the day — ZC + P2F handler (roster cell `M/P2F/ZC` or
-    # any-order equivalent). These handlers still get the F6 D-3hrs
-    # hard-block (real briefing time), but the solver SKIPS the
-    # D-1hr / D+20min ±15 max-1 partial windows so the buffer attrition
-    # doesn't compound with ZC's lower cap (14-15 day / 10-11 night).
-    zc_p2f_handler_ids: frozenset[str] = frozenset()
-
-
-def _in_window(target: int, anchors: list[int], offset_min: int, half_width: int) -> bool:
-    """True if ``target`` is within ``half_width`` of any (anchor + offset)."""
-    return any(abs(target - (a + offset_min)) <= half_width for a in anchors)
 
 
 def check(
@@ -189,43 +164,18 @@ def check(
         nominated = ctx.p2f_handler_by_shift.get(staff.shift_today)
         if nominated != staff.employee_id:
             return ExcludeReason.P2F_NOT_HANDLER
-    # F4b: NORSE handler check.
-    #  - Per user direction 2026-05-12: Night-shift staff are NEVER
-    #    eligible for NORSE.
-    #  - Per user direction 2026-05-24: A1-shift staff are ALSO
-    #    excluded by default. The user can still pin a specific A1
-    #    person via an override of type=norse — in that case the
-    #    is_norse_handler check below takes precedence over this rule.
-    #  - Exactly ONE NORSE handler is nominated per cycle; that person
-    #    takes every NORSE flight. The fallback path in step3 fills
-    #    this even when the assigner didn't pick anyone explicitly.
-    #  - The handler ALSO takes regular flights normally — NORSE
-    #    flights just don't count toward their regular cap.
-    is_norse_handler = staff.employee_id in ctx.norse_handler_ids
-    if (flight.ops_class == OpsClass.NORSE
-            and staff.shift_today in ("N", "A1")
-            and not is_norse_handler):
-        return ExcludeReason.NORSE_NOT_HANDLER
-    if (flight.ops_class == OpsClass.NORSE and ctx.norse_handler_ids
-            and not is_norse_handler):
-        return ExcludeReason.NORSE_NOT_HANDLER
     # F5: STD distribution window (user direction 2026-05-12, §1).
     # A flight is eligible for a shift only if its STD falls in that
     # shift's distribution window (M / M1 / N hard-bounded; A and A1
     # have a soft outer band that the solver penalizes via S_outer).
-    # NORSE handlers are STILL exempt for NORSE flights — they can
-    # pick up NORSE outside any window (handler-dedicated mode).
-    skip_window_check = flight.ops_class == OpsClass.NORSE and is_norse_handler
-    if not skip_window_check and not is_in_std_window(
+    if not is_in_std_window(
         flight.std, flight.date, ctx.ops_day, staff.shift_today,
     ):
         return ExcludeReason.OUT_OF_SHIFT
-    # F6: P2F handler hard-block window (H4 round-3 rewrite).
-    # For each P2F flight the handler runs, the ±15 min window around
-    # (P2F_STD - 3 hrs) is a HARD exclusion: handler can't take any normal
-    # flights there (briefing/paperwork time). The other two windows
-    # (D-1hr ±15, D+20min ±15) are partial — encoded in the solver as
-    # max-1 constraints, not as eligibility filters here.
+    # F6: P2F handler buffer (H4, user direction 2026-09-26). For each
+    # P2F flight the handler runs, no normal flight from 2 hrs before
+    # to 1 hr after its STD (prep and turnaround time). Applies to
+    # every handler, ZC+P2F included.
     #
     # Phase R override: if the (flight_key, employee_id) pair is in
     # ``ctx.skip_p2f_buffer_pairs``, skip the buffer check entirely.
@@ -240,11 +190,7 @@ def check(
                 target = std_to_ops_day_minutes(
                     flight.std, flight.date, ctx.ops_day,
                 )
-                if _in_window(
-                    target, anchors,
-                    offset_min=-P2F_HARD_BLOCK_BEFORE_HRS * 60,
-                    half_width=P2F_WINDOW_HALF_MIN,
-                ):
+                if in_p2f_block(target, anchors):
                     return ExcludeReason.P2F_HANDLER_HARD_BLOCK
     # F7: per-staff STD window (H11).
     # 2026-05-27: extended to a windowed constraint — flights must fall
@@ -267,6 +213,22 @@ def check(
         staff.shift_today, flight.std, flight.date, ctx.ops_day,
     ):
         return ExcludeReason.INTL_SHIFT_COVERAGE
+    # F10 (H20): the staff member nominated as *their own shift's* P2F
+    # handler never takes a *normal* international flight. Keeping
+    # ordinary INTL work off their plate frees up the time/slots
+    # they'd otherwise spend on it for more P2F flights instead. This
+    # must NOT touch the handler's own P2F flights — a P2F flight can
+    # itself be international (e.g. HAN-CCU), and F4 above is already
+    # the sole authority on who may take it; excluding it here would
+    # leave that flight with zero eligible staff. Mirrors F4's lookup
+    # — only the handler nominated for the shift they're working
+    # today is affected.
+    if (
+        flight.is_international
+        and flight.ops_class != OpsClass.P2F
+        and ctx.p2f_handler_by_shift.get(staff.shift_today) == staff.employee_id
+    ):
+        return ExcludeReason.P2F_HANDLER_NO_INTL
     return None
 
 
@@ -311,22 +273,6 @@ def diagnose_unassignable(
     return out
 
 
-def p2f_partial_block_anchors(
-    handler_p2f_flight_minutes: list[int],
-) -> tuple[list[int], list[int]]:
-    """Return the partial-block window centers (D-1hr and D+20min anchors)
-    for the solver to encode as max-1-flight constraints.
-
-    Result: (centers_d_minus_1hr, centers_d_plus_20min). The solver will
-    iterate each list and add a constraint like
-    ``Σ_f (x[f, handler] for f in 30-min window around center) ≤ 1``.
-    """
-    return (
-        [a - P2F_PARTIAL_BEFORE_HRS * 60 for a in handler_p2f_flight_minutes],
-        [a + P2F_PARTIAL_AFTER_MIN for a in handler_p2f_flight_minutes],
-    )
-
-
 # ---------- preprocessing helpers ----------
 
 def tag_awkward_window(flight: FlightInput, ops_day: date_t) -> FlightInput:
@@ -345,10 +291,8 @@ def tag_awkward_window(flight: FlightInput, ops_day: date_t) -> FlightInput:
 
 def sheet_target_for(flight: FlightInput, staff: StaffMember) -> AllocationSheet:
     """Resolve which allocation lane the row belongs to. Routing is
-    by ops_class (NORSE / P2F) with the day/night split decided by the
+    by ops_class (P2F) with the day/night split decided by the
     assigned STAFF's shift (clarification 1)."""
-    if flight.ops_class == OpsClass.NORSE:
-        return AllocationSheet.NORSE
     if flight.ops_class == OpsClass.P2F:
         return AllocationSheet.P2F
     return (

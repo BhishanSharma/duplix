@@ -61,13 +61,11 @@ _ALLOC_SHEET_NAME = {
     AllocationSheet.DAY_OPS: "Allocations_DayOps",
     AllocationSheet.NIGHT_OPS: "Allocations_NightOps",
     AllocationSheet.P2F: "Allocations_P2F",
-    AllocationSheet.NORSE: "Allocations_NORSE",
 }
 _CLEANED_SHEET_NAME = {
     OpsClass.DAY: "Flights_DayOps",
     OpsClass.NIGHT: "Flights_NightOps",
     OpsClass.P2F: "Flights_P2F",
-    OpsClass.NORSE: "Flights_NORSE",
     OpsClass.GULF: "Flights_Gulf",
     OpsClass.TEST: "Flights_Test",
     OpsClass.FERRY: "Flights_Ferry",

@@ -114,7 +114,7 @@
 }
 .roster-edit-apply:hover { background: var(--hover); }
 
-/* Handler Assign pane (P2F / NORSE nominations) */
+/* Handler Assign pane (P2F nominations) */
 #handler-assign-search {
   width: 100%; box-sizing: border-box; padding: 8px 10px;
   border: 1px solid var(--line); border-radius: var(--radius); font: inherit;

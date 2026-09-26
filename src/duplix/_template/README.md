@@ -59,7 +59,7 @@ python -m src.cli                # --port 9000 --no-browser also work
    staffing recommendation.
 5. Click **Allocate** — CP-SAT solves, typically 30–90s on a first run.
 6. Adjust anything that needs it from the **Override** drawer:
-   - `p2f` / `norse` — handler nominations
+   - `p2f` — P2F handler nominations
    - `sick` — pull someone out of the day
    - `change_role` — promote STAFF→ZC, or push someone to AM
    - `max_flights` / `cutoff_time` — per-staff caps
@@ -212,7 +212,7 @@ Routes (JSON unless noted):
     GET  /api/unallocated           unallocated flights
     GET  /api/recommendations       Phase-R suggestions per unallocated
     GET  /api/plan                  plan summary payload
-    GET  /api/handlers              P2F / NORSE handler picture
+    GET  /api/handlers              P2F handler picture
     GET  /api/staffing              staffing recommendation
     GET  /api/staff_names           roster names for the drawer dropdowns
     GET  /api/shift_limits          current (shift, role) bands

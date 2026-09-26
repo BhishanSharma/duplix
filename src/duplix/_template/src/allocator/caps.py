@@ -110,6 +110,38 @@ def reload_defaults() -> None:
         _defaults = _load_defaults_from_disk()
 
 
+def _dump_defaults(raw: dict) -> str:
+    """Serialise shift_limits.json in its hand-written layout — the
+    comment block one string per line, then one line per (shift, role)
+    band — so a Setup sidebar save leaves a readable diff."""
+    def dumps(v: object) -> str:
+        return json.dumps(v, ensure_ascii=False)
+
+    # Continuation lines line up under the first role: 4 indent + the
+    # 6-wide shift key + "{ ".
+    role_pad = " " * 12
+    parts: list[str] = []
+    for key, value in raw.items():
+        if key == "shifts":
+            shift_lines = []
+            for shift, roles in value.items():
+                role_lines = [
+                    f"{dumps(role) + ':':<9}{{ "
+                    + ", ".join(f"{dumps(k)}: {dumps(v)}" for k, v in band.items())
+                    + " }"
+                    for role, band in roles.items()
+                ]
+                body = (",\n" + role_pad).join(role_lines)
+                shift_lines.append(f"    {dumps(shift) + ':':<6}{{ {body} }}")
+            parts.append('  "shifts": {\n' + ",\n".join(shift_lines) + "\n  }")
+        elif isinstance(value, list):
+            items = ",\n".join(f"    {dumps(v)}" for v in value)
+            parts.append(f"  {dumps(key)}: [\n{items}\n  ]")
+        else:
+            parts.append(f"  {dumps(key)}: {dumps(value)}")
+    return "{\n" + ",\n".join(parts) + "\n}\n"
+
+
 def _state_path_or_none() -> Path | None:
     """Return the runtime-state file path, or None if its parent
     directory cannot be created. Callers treat None as "no persistence
@@ -211,6 +243,67 @@ def get_band(shift: str, role: Role) -> dict[str, int] | None:
         if (shift, role) in _defaults:
             return dict(_defaults[(shift, role)])
     return None
+
+
+def default_caps() -> dict[str, dict[str, int]]:
+    """The saved hard cap (``max``) per shift and role, as
+    ``{shift: {"STAFF": n, "ZC": n}}`` in file order — what the Setup
+    sidebar's cap table shows. Iteration overrides are not applied."""
+    with _lock:
+        out: dict[str, dict[str, int]] = {}
+        for (shift, role), band in _defaults.items():
+            out.setdefault(shift, {})[_ROLE_KEYS[role]] = band["max"]
+        return out
+
+
+def set_default_caps(caps: dict[str, dict[str, object]]) -> list[str]:
+    """Save new hard caps (``max``) to ``configs/shift_limits.json`` and
+    reload them, so the next run uses them. The Setup sidebar's cap
+    table is the caller; an iteration override still shadows its band.
+
+    A cap below a band's min or target pulls those down to it, keeping
+    ``min <= target <= max``; returns one note per band that moved.
+    Raises ``ValueError``, before anything is written, on an unknown
+    shift or role, a cap that isn't a positive whole number, or a ZC
+    cap above that shift's STAFF cap.
+    """
+    global _defaults
+    with _lock:
+        raw = json.loads(_CONFIG_PATH.read_text(encoding="utf-8"))
+        shifts_block = raw.get("shifts", {})
+        notes: list[str] = []
+        for shift, role_caps in caps.items():
+            if not isinstance(role_caps, dict):
+                raise ValueError(f"{shift}: expected {{role: cap}}, got {role_caps!r}")
+            for role_name, cap in role_caps.items():
+                where = f"{shift}/{role_name}"
+                band = shifts_block.get(shift, {}).get(role_name)
+                if shift not in _KNOWN_SHIFTS or band is None:
+                    raise ValueError(f"unknown shift/role {where}")
+                if isinstance(cap, bool) or not isinstance(cap, int) or cap <= 0:
+                    raise ValueError(
+                        f"{where} cap must be a positive whole number, got {cap!r}"
+                    )
+                band["max"] = cap
+                lowered = [
+                    f"{label} {band[key]}"
+                    for key, label in (("min", "preferred"), ("target", "target"))
+                    if band[key] > cap
+                ]
+                if lowered:
+                    band["min"] = min(band["min"], cap)
+                    band["target"] = min(band["target"], cap)
+                    notes.append(f"{where}: {' and '.join(lowered)} lowered to {cap}")
+        for shift, roles in shifts_block.items():
+            staff, zc = roles.get("STAFF"), roles.get("ZC")
+            if staff and zc and zc["max"] > staff["max"]:
+                raise ValueError(
+                    f"{shift}: the ZC cap ({zc['max']}) can't be above the "
+                    f"STAFF cap ({staff['max']})"
+                )
+        _CONFIG_PATH.write_text(_dump_defaults(raw), encoding="utf-8")
+        _defaults = _load_defaults_from_disk()
+    return notes
 
 
 def set_iteration_band(
@@ -405,12 +498,14 @@ def __getattr__(name: str):  # pragma: no cover — module-level dynamic attr
 __all__ = [
     "acceptable_max_for",
     "aggregate_capacity",
+    "default_caps",
     "get_band",
     "hard_cap_for",
     "preferred_target_for",
     "preferred_target_for_shift_role",
     "reload_defaults",
     "reset_overrides",
+    "set_default_caps",
     "set_iteration_band",
     "set_iteration_per_staff_cap",
     "set_iteration_per_staff_preferred",

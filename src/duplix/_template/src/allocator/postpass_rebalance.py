@@ -13,7 +13,7 @@ finding #4).
 
 This pass runs LAST, after both post-passes, and does the obvious thing
 a human scheduler would do: for each (shift, role) bucket (same
-exclusions as H18 — AM role and P2F/NORSE handlers are left out, since
+exclusions as H18 — AM role and P2F handlers are left out, since
 their workload mix isn't comparable), while the most-loaded and
 least-loaded staff differ by more than ``target_spread``, move ONE
 eligible plain-domestic flight from the most-loaded to the
@@ -41,7 +41,7 @@ from ..schemas import (
 )
 from .caps import hard_cap_for
 from .eligibility import sheet_target_for
-from .windows import required_spacing_min, std_to_ops_day_minutes
+from .windows import SpacingKey, spacing_clear, spacing_key, std_to_ops_day_minutes
 
 
 @dataclass
@@ -61,12 +61,12 @@ class RebalanceSummary:
 
 
 def _transferable(flight: FlightInput | None) -> bool:
-    """Only move plain-domestic flights. P2F/NORSE routing is handled
+    """Only move plain-domestic flights. P2F routing is handled
     by dedicated logic elsewhere and shouldn't be touched here — this
     mirrors ``postpass_intl._eligible_for_removal``."""
     if flight is None:
         return False
-    return flight.ops_class not in (OpsClass.P2F, OpsClass.NORSE)
+    return flight.ops_class != OpsClass.P2F
 
 
 def apply_rebalance_pass(
@@ -75,7 +75,6 @@ def apply_rebalance_pass(
     staff_today: list[StaffMember],
     matrix: dict[str, set[str]],
     p2f_handlers: dict[ShiftCode, str],
-    norse_handlers: set[str],
     d_day: date_t,
     target_spread: int = 1,
     max_transfers_per_bucket: int = 40,
@@ -108,18 +107,16 @@ def apply_rebalance_pass(
         }
 
     counts: dict[str, int] = defaultdict(int)
-    staff_stds: dict[str, list[int]] = defaultdict(list)
+    staff_stds: dict[str, list[SpacingKey]] = defaultdict(list)
     for uid, st in rstate.items():
         if not st["staff_id"]:
             continue
         counts[st["staff_id"]] += 1
         f_ref = flight_by_uid.get(uid)
         if f_ref is not None:
-            staff_stds[st["staff_id"]].append(
-                std_to_ops_day_minutes(f_ref.std, f_ref.date, d_day)
-            )
+            staff_stds[st["staff_id"]].append(spacing_key(f_ref, d_day))
 
-    excluded_handlers = set(p2f_handlers.values()) | set(norse_handlers)
+    excluded_handlers = set(p2f_handlers.values())
     buckets: dict[tuple[ShiftCode, Role], list[StaffMember]] = defaultdict(list)
     for s in staff_today:
         if s.shift_today is None or s.role == Role.AM:
@@ -159,7 +156,6 @@ def apply_rebalance_pass(
                 )
                 for uid in donor_flight_uids:
                     f = flight_by_uid[uid]
-                    f_std_min = std_to_ops_day_minutes(f.std, f.date, d_day)
                     eligible_set = matrix.get(uid, set())
                     for recipient_id in recipients:
                         if recipient_id == donor_id:
@@ -169,10 +165,9 @@ def apply_rebalance_pass(
                         recipient = staff_by_id[recipient_id]
                         if counts.get(recipient_id, 0) >= hard_cap_for(recipient):
                             continue
-                        existing = staff_stds.get(recipient_id, ())
-                        if not all(
-                            abs(std - f_std_min) >= required_spacing_min(std, f_std_min)
-                            for std in existing
+                        f_entry = spacing_key(f, d_day)
+                        if not spacing_clear(
+                            f_entry, staff_stds.get(recipient_id, ()),
                         ):
                             continue
 
@@ -181,8 +176,8 @@ def apply_rebalance_pass(
                         counts[donor_id] -= 1
                         counts[recipient_id] = counts.get(recipient_id, 0) + 1
                         with contextlib.suppress(ValueError):
-                            staff_stds[donor_id].remove(f_std_min)
-                        staff_stds.setdefault(recipient_id, []).append(f_std_min)
+                            staff_stds[donor_id].remove(f_entry)
+                        staff_stds.setdefault(recipient_id, []).append(f_entry)
                         st["staff_id"] = recipient.employee_id
                         st["staff_name"] = recipient.name
                         st["sheet_target"] = sheet_target_for(f, recipient)

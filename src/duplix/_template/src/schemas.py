@@ -48,9 +48,7 @@ class CrewStatus(StrEnum):
     # roles. `M/ZC/P2F` (or `M/P2F/ZC`, any order) marks the staff as
     # the M-shift ZC AND the M-shift P2F handler. Canonical form is
     # alphabetical: M < P2F < ZC. Cap stays at ZC's lower band (14-15
-    # day / 10-11 night), applied to regular+P2F combined; the D-1hr
-    # and D+20min ±15 partial windows are skipped for these handlers
-    # so the buffer attrition doesn't compound with the ZC cap.
+    # day / 10-11 night), applied to regular+P2F combined.
     ZC_P2F_M = "M/P2F/ZC"
     ZC_P2F_A = "A/P2F/ZC"
     ZC_P2F_N = "N/P2F/ZC"
@@ -95,7 +93,6 @@ class OpsClass(StrEnum):
     NIGHT = "night"
     P2F = "p2f"
     FERRY = "ferry"
-    NORSE = "norse"
     TEST = "test"
     CHARTER = "charter"
     GULF = "gulf"
@@ -117,9 +114,8 @@ class RawFlightRow(BaseModel):
     arr_time: time_t | None = None
     aircraft_type: str | None = None
     aircraft_subtype: str | None = None
-    # Aircraft Owner carrier code. Used to classify NORSE per user
-    # direction 2026-05-11: owner code `N0` (or `AC-789`) → NORSE,
-    # everything else routes by TYPE / date as before.
+    # Aircraft Owner carrier code. Used for GULF owner routing and the
+    # extraction filters; everything else routes by TYPE / date.
     owner: str | None = None
     date: date_t | None = None
     booked_pax_raw: str | None = None
@@ -382,7 +378,6 @@ class OverrideType(StrEnum):
     """
     # Handler nominations (engine reads at solve time)
     P2F                = "p2f"
-    NORSE              = "norse"
     # Per-staff constraints (read at solve time)
     SICK               = "sick"
     CHANGE_ROLE        = "change_role"
@@ -407,7 +402,6 @@ class OverrideType(StrEnum):
 # excluded here.
 OVERRIDE_TYPES_FOR_UI: tuple[OverrideType, ...] = (
     OverrideType.P2F,
-    OverrideType.NORSE,
     OverrideType.SICK,
     OverrideType.CHANGE_ROLE,
     OverrideType.CHANGE_SHIFT,
@@ -418,7 +412,7 @@ OVERRIDE_TYPES_FOR_UI: tuple[OverrideType, ...] = (
 
 # Subset that the staged-form helper accepts (add/remove flight/staff,
 # the Roster Change pane's shift moves, and the Handler Assign pane's
-# P2F/NORSE nominations — all apply immediately, no drawer round-trip).
+# P2F nominations — all apply immediately, no drawer round-trip).
 STAGED_FORM_OVERRIDE_TYPES: tuple[OverrideType, ...] = (
     OverrideType.ADD_FLIGHT,
     OverrideType.REMOVE_FLIGHT,
@@ -426,7 +420,6 @@ STAGED_FORM_OVERRIDE_TYPES: tuple[OverrideType, ...] = (
     OverrideType.REMOVE_STAFF,
     OverrideType.CHANGE_SHIFT,
     OverrideType.P2F,
-    OverrideType.NORSE,
 )
 
 
@@ -449,7 +442,6 @@ STAGED_FORM_OVERRIDE_TYPES: tuple[OverrideType, ...] = (
 OVERRIDE_TYPE_RELEVANT_COLS: dict[OverrideType, tuple[str, ...]] = {
     # ----- User-facing (handler nominations + per-staff) -----
     OverrideType.P2F:               ("type", "employee", "shift"),
-    OverrideType.NORSE:             ("type", "employee"),
     OverrideType.SICK:              ("type", "employee"),
     # change_role: the "shift" column carries the new ROLE
     # (STAFF / ZC / AM), not a shift code — the frontend swaps the
@@ -757,7 +749,6 @@ class AllocationSheet(StrEnum):
     DAY_OPS = "DayOps"
     NIGHT_OPS = "NightOps"
     P2F = "P2F"
-    NORSE = "NORSE"
 
 
 class FlightInput(BaseModel):
@@ -890,14 +881,6 @@ class P2FNomination(BaseModel):
     model_config = ConfigDict(frozen=True)
     date: date_t
     shift: ShiftCode
-    employee_id: str
-
-
-class NORSEHandler(BaseModel):
-    """Per-day NORSE handler nomination from an override row."""
-
-    model_config = ConfigDict(frozen=True)
-    date: date_t
     employee_id: str
 
 
@@ -1044,13 +1027,13 @@ class RaiseCapForFlight(BaseModel):
 
 
 class SkipP2FBuffer(BaseModel):
-    """Waive a P2F handler's D-3hr / D-1hr / D+20min buffer to allow ONE
+    """Waive a P2F handler's buffer (STD-2hrs to STD+1hr) to allow ONE
     specific normal flight inside the window.
 
     Override columns: type=skip_p2f_buffer, flight, std, employee.
 
     Example. GAYATHRI is P2F-M handler. flt 6142 (08:35) falls in her
-    D-3hr buffer (engine F6 hard-blocks). A SkipP2FBuffer row of:
+    P2F buffer (engine F6 hard-blocks). A SkipP2FBuffer row of:
         date=2026-05-06, flight=6142, std=08:35, employee=GAYATHRI
     tells eligibility F6 to skip the buffer check for this exact
     (flight, staff) pair.

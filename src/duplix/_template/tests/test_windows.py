@@ -167,29 +167,69 @@ def test_awkward_routing_ignores_next_day_flights():
 
 # ---------- H10 spacing ----------
 
-def test_relaxed_band_edges_are_inclusive():
-    assert w.is_in_h10_relaxed_band(t(5, 0), D, D)
-    assert w.is_in_h10_relaxed_band(t(5, 30), D, D)
-    assert not w.is_in_h10_relaxed_band(t(5, 31), D, D)
-    assert w.is_in_h10_relaxed_band(t(20, 0), D, D)
-    assert w.is_in_h10_relaxed_band(t(22, 0), D, D)
-    assert not w.is_in_h10_relaxed_band(t(22, 1), D, D)
+def test_rush_band_edges_are_inclusive():
+    assert w.is_in_rush_band(t(5, 0), D, D)
+    assert w.is_in_rush_band(t(5, 30), D, D)
+    assert not w.is_in_rush_band(t(5, 31), D, D)
+    assert w.is_in_rush_band(t(20, 0), D, D)
+    assert w.is_in_rush_band(t(22, 0), D, D)
+    assert not w.is_in_rush_band(t(22, 1), D, D)
 
 
-def test_spacing_floor_per_flight():
-    assert w.spacing_floor_min_for_flight(t(5, 15), D, D) == 10
-    assert w.spacing_floor_min_for_flight(t(9, 0), D, D) == 15
+def dom(minutes):
+    return (minutes, False, False)
 
 
-def test_required_spacing_needs_both_flights_in_a_band():
-    both = (20 * 60 + 30, 21 * 60)
-    assert w.required_spacing_min(*both) == 10
-    assert w.required_spacing_min(20 * 60 + 30, 19 * 60) == 15
-    assert w.required_spacing_min(9 * 60, 10 * 60) == 15
+def intl(minutes):
+    return (minutes, True, False)
+
+
+def p2f(minutes, is_intl=False):
+    return (minutes, is_intl, True)
+
+
+def test_spacing_key_reads_std_intl_and_p2f():
+    from types import SimpleNamespace
+
+    from src.schemas import OpsClass
+    f = SimpleNamespace(std=t(2, 0), date=D1, is_international=True, ops_class=OpsClass.P2F)
+    assert w.spacing_key(f, D) == (1560, True, True)
+
+
+def test_required_spacing_is_15_even_in_a_rush_band():
+    assert w.required_spacing_min(dom(20 * 60 + 30), dom(21 * 60)) == 15
+    assert w.required_spacing_min(dom(9 * 60), dom(10 * 60)) == 15
+
+
+def test_required_spacing_is_30_for_domestic_then_intl():
+    assert w.required_spacing_min(dom(540), intl(560)) == 30
+    assert w.required_spacing_min(intl(560), dom(540)) == 30  # argument order doesn't matter
+    assert w.required_spacing_min(intl(540), dom(560)) == 15  # INTL then domestic
+    assert w.required_spacing_min(intl(540), intl(560)) == 15
+
+
+def test_required_spacing_is_30_between_two_p2f_flights():
+    assert w.required_spacing_min(p2f(540), p2f(560)) == 30
+    assert w.required_spacing_min(p2f(540), dom(560)) == 15   # P2F then normal
+    assert w.required_spacing_min(dom(540), p2f(560)) == 15
+    assert w.required_spacing_min(dom(540), p2f(560, is_intl=True)) == 30
+
+
+def test_spacing_clear_checks_every_other_flight():
+    others = [dom(9 * 60), intl(11 * 60), p2f(12 * 60)]
+    assert w.spacing_clear(dom(10 * 60), others)
+    assert not w.spacing_clear(dom(9 * 60 + 14), others)       # 14 min after
+    assert not w.spacing_clear(dom(10 * 60 + 31), others)      # 29 min before an INTL
+    assert w.spacing_clear(dom(10 * 60 + 30), others)          # exactly 30
+    assert not w.spacing_clear(intl(9 * 60 + 29), others)      # INTL 29 min after domestic
+    assert not w.spacing_clear(p2f(12 * 60 + 29), others)      # P2F 29 min after a P2F
+    assert w.spacing_clear(p2f(12 * 60 + 30), others)
+    assert w.spacing_clear(dom(12 * 60 + 15), others)          # normal after P2F: 15
 
 
 def test_spacing_constants_ordering():
-    assert w.SPACING_RELAXED_MIN < w.SPACING_HARD_MIN < w.SPACING_SOFT_WARN_MIN
+    assert w.SPACING_HARD_MIN < w.SPACING_SOFT_WARN_MIN < w.SPACING_DOM_TO_INTL_MIN
+    assert w.SPACING_MAX_MIN == max(w.SPACING_DOM_TO_INTL_MIN, w.SPACING_P2F_PAIR_MIN)
 
 
 # ---------- shift-boundary proximity ----------

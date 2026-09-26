@@ -107,6 +107,43 @@ button.icon-button {
   height: 17px;
 }
 
+/* ---- export menu ---- */
+
+.export-menu {
+  position: relative;
+}
+
+.export-menu-list {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 20;
+  min-width: 200px;
+  background: var(--bg-card);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+}
+
+.export-menu-item {
+  border: 0;
+  background: transparent;
+  text-align: left;
+  padding: 8px 10px;
+  font: inherit;
+  font-size: 13px;
+  color: var(--text);
+  border-radius: var(--radius);
+  cursor: pointer;
+}
+
+.export-menu-item:hover {
+  background: var(--hover);
+}
+
 /* ---- main ---- */
 
 main {

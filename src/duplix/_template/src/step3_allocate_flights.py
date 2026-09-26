@@ -8,16 +8,16 @@ Reads from state:
 
 Builds:
   StaffMember per assignable staff (STAFF + ZC; AM excluded)
-  EligibilityContext (P2F handler + flight times; NORSE handler)
+  EligibilityContext (P2F handler + flight times)
   Sparse eligibility matrix
   Pair list (deterministic from row order; secondary handover-only when
     A surplus exists; split-1+2 at A→N; N→M cross-role for excess M-ZCs)
 
-Solves with CP-SAT (hard constraints H1, H10, H16; H4 partial-block;
+Solves with CP-SAT (hard constraints H1, H10, H16, H17;
 S1+S3+S4+S5+S6+S7 enabled).
 
 Writes back to state:
-  allocations (each row tagged with its DayOps / NightOps / P2F / NORSE lane)
+  allocations (each row tagged with its DayOps / NightOps / P2F lane)
   pairs, workload summary, unallocated list
   warnings (W201/W210/W211 surfaced; appended to the Plan stage's)
   recommendations for whatever could not be placed
@@ -48,7 +48,6 @@ from .allocator.postsolve import (
 from .allocator.windows import std_to_ops_day_minutes
 from .config import Config, load_config
 from .io.readers import (
-    read_norse_handlers,
     read_p2f_nominations,
     read_per_staff_overrides,
     read_raise_cap_overrides,
@@ -349,8 +348,8 @@ def _build_p2f_handler_anchors(
     ops_day: date_t,
 ) -> dict[str, list[int]]:
     """Compute the list of P2F flight STDs (in ops-day minutes) per
-    handler — drives the H4 partial-block windows in the solver and
-    the F6 hard exclusion in eligibility."""
+    handler — drives the H4 buffer (F6 in eligibility: no normal
+    flights from STD-2hrs to STD+1hr)."""
     out: dict[str, list[int]] = defaultdict(list)
     # Group P2F flights by their shift's handler.
     for f in flights:
@@ -425,7 +424,6 @@ def run(
 
     # Step-4-specific overrides (date is implicit from d_day).
     p2f_nominations = read_p2f_nominations(overrides, d_day, name_to_id)
-    norse_handlers = read_norse_handlers(overrides, d_day, name_to_id)
     per_staff = read_per_staff_overrides(overrides, d_day, name_to_id)
     # Per-day "sick" pulls a staff out of today's allocation. Applied
     # below once staff_today is built — we zero their shift_today so
@@ -633,7 +631,6 @@ def run(
     #      shift wins.
     #   2. override `p2f` rows — overwrite the auto-pick if the
     #      assigner explicitly nominates a different person.
-    # NORSE handlers come from overrides only (no roster shorthand).
     staff_by_id = {s.employee_id: s for s in staff_today}
     auto_p2f = _read_auto_p2f_handlers_from_rosters(am_rows, availability, d_day)
     p2f_handler_by_shift: dict[ShiftCode, str] = dict(auto_p2f)
@@ -758,112 +755,6 @@ def run(
 
     p2f_anchors = _build_p2f_handler_anchors(flights, p2f_handler_by_shift, d_day)
 
-    # NORSE handler nomination — user direction 2026-05-12 (Task 6):
-    # exactly ONE person holds every NORSE flight for the allocation
-    # cycle. Night-shift staff are NEVER eligible regardless of role.
-    # If no nominee is given, pick a random non-N ZC as the handler.
-    # If multiple nominees are given, the first valid one wins and the
-    # extras are dropped with a W213 warning.
-    norse_handler_ids: list[str] = []
-    has_norse_flights = any(f.ops_class == OpsClass.NORSE for f in flights)
-    p2f_handler_set = set(p2f_handler_by_shift.values())
-    extra_dropped: list[str] = []
-    for nom in norse_handlers:
-        if nom.date != d_day:
-            continue
-        s = staff_by_id.get(nom.employee_id)
-        if s is None:
-            warnings.append(WarningRow(
-                severity=Severity.ERROR, code="W213", date=d_day,
-                message=(
-                    f"NORSE nomination employee_id {nom.employee_id} "
-                    "not on roster today."
-                ),
-            ))
-            continue
-        if s.shift_today is None:
-            warnings.append(WarningRow(
-                severity=Severity.ERROR, code="W213", date=d_day,
-                name=s.name,
-                message=(
-                    f"NORSE nominee {s.name} is OFF today. "
-                    "Pick someone who's on shift."
-                ),
-            ))
-            continue
-        if s.shift_today == "N":
-            warnings.append(WarningRow(
-                severity=Severity.ERROR, code="W213", date=d_day,
-                name=s.name,
-                message=(
-                    f"NORSE nominee {s.name} is on Night shift. "
-                    "Night-shift staff are never eligible for NORSE — "
-                    "pick someone on M/A/M1/A1."
-                ),
-            ))
-            continue
-        if nom.employee_id in p2f_handler_set:
-            warnings.append(WarningRow(
-                severity=Severity.WARN, code="W213", date=d_day,
-                name=s.name,
-                message=(
-                    f"NORSE nominee {s.name} is also a P2F handler today. "
-                    "Pick a different person — handlers should not double up."
-                ),
-            ))
-            continue
-        if norse_handler_ids:
-            extra_dropped.append(s.name)
-            continue
-        norse_handler_ids.append(nom.employee_id)
-    if extra_dropped:
-        warnings.append(WarningRow(
-            severity=Severity.WARN, code="W213", date=d_day,
-            message=(
-                "Multiple NORSE nominees — only the first is used. "
-                f"Dropped: {', '.join(extra_dropped)}. NORSE is now "
-                "single-handler per user direction 2026-05-12."
-            ),
-        ))
-
-    norse_count = sum(1 for f in flights if f.ops_class == OpsClass.NORSE)
-    # 2026-05-18 (user direction, revised): one NORSE handler, all
-    # NORSE flights go to them — even D+1 night tail and even when
-    # two NORSE STDs overlap. If H10 spacing blocks one, accept the
-    # unallocated; the operator handles those manually. No
-    # auto-pick-extras logic.
-    if has_norse_flights and not norse_handler_ids:
-        import random as _rand
-        eligible_zc = [
-            s for s in staff_today
-            if s.role == Role.ZC
-            and s.shift_today is not None
-            and s.shift_today != "N"
-            and s.employee_id not in p2f_handler_set
-        ]
-        if eligible_zc:
-            rng = _rand.Random(d_day.isoformat())
-            pick = rng.choice(eligible_zc)
-            norse_handler_ids.append(pick.employee_id)
-            warnings.append(WarningRow(
-                severity=Severity.WARN, code="W213", date=d_day,
-                name=pick.name,
-                message=(
-                    "No NORSE handler nominated — auto-picked "
-                    f"{pick.name} ({pick.shift_today}/ZC) at random "
-                    "from non-N ZCs. Nominate explicitly via the "
-                    "override drawer to lock the choice."
-                ),
-            ))
-        else:
-            warnings.append(WarningRow(
-                severity=Severity.ERROR, code="W213", date=d_day,
-                message=(
-                    "NORSE flights exist but no non-Night ZC is on "
-                    "shift to take them. Nominate an M/A/M1/A1 ZC."
-                ),
-            ))
-
     # ---- Phase R per-flight override sets ----
     # Build a (flt, std_iso) → unique_id resolver so override rows
     # (which key by flt+std) map onto the solver's unique_id keying.
@@ -934,34 +825,11 @@ def run(
             f"skip_intl_removal={len(skip_intl_removal_rows)}"
         )
 
-    # 2026-05-26 (user direction): any P2F handler whose role is ZC
-    # gets the partial-buffer relaxation. Source covers both roster-
-    # driven (`M/P2F/ZC` cell auto-pick) and override-driven
-    # nominations of a ZC as P2F handler — relaxation applies either
-    # way. F6 D-3hrs hard block still applies.
-    zc_p2f_handler_ids: set[str] = set()
-    for _shift, _handler_id in p2f_handler_by_shift.items():
-        _s = staff_by_id.get(_handler_id)
-        if _s is not None and _s.role == Role.ZC:
-            zc_p2f_handler_ids.add(_handler_id)
-    if zc_p2f_handler_ids:
-        _names = ", ".join(
-            staff_by_id[eid].name for eid in sorted(zc_p2f_handler_ids)
-            if eid in staff_by_id
-        )
-        print(
-            f"  Combined ZC+P2F handlers: {len(zc_p2f_handler_ids)} "
-            f"({_names}) — partial buffer windows (D-1hr / D+20min) "
-            "skipped so the ZC cap isn't double-penalised."
-        )
-
     elig_ctx = EligibilityContext(
         ops_day=d_day,
         p2f_handler_by_shift=p2f_handler_by_shift,
         p2f_flight_minutes_by_handler=p2f_anchors,
-        norse_handler_ids=tuple(norse_handler_ids),
         skip_p2f_buffer_pairs=frozenset(skip_p2f_buffer_pairs),
-        zc_p2f_handler_ids=frozenset(zc_p2f_handler_ids),
     )
 
     # --- Eligibility matrix + zero-eligibility check (W201) ----------
@@ -1061,7 +929,7 @@ def run(
     #
     # Per (shift, role): level = round(total_flights / non_handler_staff_count),
     # clipped to [band.min, band.max] from configs/shift_limits.json.
-    # Handlers (P2F + NORSE nominated) are excluded from the bucket —
+    # P2F handlers are excluded from the bucket —
     # they're already shape-shifted by their handler-specific rules.
     #
     # 2026-09-23 fix: ``total_flights`` above must be the flights that
@@ -1085,7 +953,7 @@ def run(
             if s_start <= f_std_min <= s_end:
                 flights_per_shift_min[shift_code_iter] += 1
                 break
-    handler_set = set(p2f_handler_by_shift.values()) | set(norse_handler_ids)
+    handler_set = set(p2f_handler_by_shift.values())
     bucket_sizes: dict[tuple[ShiftCode, Role], int] = defaultdict(int)
     staff_per_shift: dict[ShiftCode, int] = defaultdict(int)
     for s in staff_today:
@@ -1175,6 +1043,7 @@ def run(
     _solve_kwargs = dict(
         ops_day=d_day,
         max_seconds=config.solver.max_seconds,
+        num_workers=config.solver.num_workers,
         elig_ctx=elig_ctx,
         enable_s1_count_balance=True,
         # S3 (heavy-flight spread) used pax to identify "heavy" flights;
@@ -1189,7 +1058,7 @@ def run(
         # distribution across handlers within each shift.
         enable_s_intl_spacing=True,
         enable_s_intl_fair=True,
-        # Patch 2026-05-15: within the H10-relaxed bands, prefer staff
+        # Patch 2026-05-15: within the rush bands, prefer staff
         # whose shift isn't transitioning (±30 min of nominal start/end).
         enable_s_band_shift_stability=True,
         # Phase R per-flight overrides — empty by default, populated
@@ -1309,7 +1178,6 @@ def run(
         out_rows, summary = apply_intl_post_pass(
             in_rows, flights, staff_today, matrix,
             elig_ctx_p2f_handlers=elig_ctx.p2f_handler_by_shift,
-            elig_ctx_norse_handlers=set(elig_ctx.norse_handler_ids),
             d_day=d_day,
             # Phase R: per-INTL-flight opt-out from the preceding-removal.
             skip_intl_removal_keys=frozenset(skip_intl_removal_keys),
@@ -1333,7 +1201,6 @@ def run(
             out_rows, summary = apply_p2f_post_pass_v2(
                 in_rows, flights, staff_today, matrix,
                 p2f_handlers=elig_ctx.p2f_handler_by_shift,
-                norse_handlers=set(elig_ctx.norse_handler_ids),
                 d_day=d_day,
             )
             tag = "P2F post-pass (v2 union window)"
@@ -1342,7 +1209,6 @@ def run(
             out_rows, summary = apply_p2f_post_pass(
                 in_rows, flights, staff_today, matrix,
                 p2f_handlers=elig_ctx.p2f_handler_by_shift,
-                norse_handlers=set(elig_ctx.norse_handler_ids),
                 d_day=d_day,
                 tolerance_minutes=config.p2f_adjustment.tolerance_minutes,
             )
@@ -1386,7 +1252,6 @@ def run(
     rows, rebalance_summary = apply_rebalance_pass(
         rows, flights, staff_today, matrix,
         p2f_handlers=elig_ctx.p2f_handler_by_shift,
-        norse_handlers=set(elig_ctx.norse_handler_ids),
         d_day=d_day,
     )
     if rebalance_summary.n_transfers:
@@ -1402,14 +1267,19 @@ def run(
         if len(rebalance_summary.log_lines) > 20:
             print(f"  rebalance: ... + {len(rebalance_summary.log_lines) - 20} more lines")
 
-    # 2026-09-23 (user direction): floating 45-min break per on-shift
-    # staff, soft/best-effort, via 1-for-1 swaps only — never changes
+    # 2026-09-23 (user direction): floating mid-shift break per on-shift
+    # staff (length from config.yml, set in the Setup sidebar),
+    # soft/best-effort, via 1-for-1 swaps only — never changes
     # anyone's flight count, so it can't disturb the H18/rebalance
     # workload spread above. Runs LAST, against the final schedule.
     from .allocator.postpass_break import apply_break_pass
-    rows, break_summary = apply_break_pass(rows, flights, staff_today, matrix, d_day)
+    rows, break_summary = apply_break_pass(
+        rows, flights, staff_today, matrix, d_day,
+        break_len=config.break_pass.length_minutes,
+    )
     print(
-        f"  Break pass: considered={break_summary.n_staff_considered} "
+        f"  Break pass ({config.break_pass.length_minutes} min): "
+        f"considered={break_summary.n_staff_considered} "
         f"already_clear={break_summary.n_clean} "
         f"cleared_via_swap={break_summary.n_created_via_swap} "
         f"partial={break_summary.n_partial} "
@@ -1538,14 +1408,11 @@ def run(
     # responsible person.
     #
     # Selection: round-robin across N-shift STAFF (excludes ZC, AM,
-    # P2F handler, NORSE handler) — fair load on the prep work and
+    # P2F handler) — fair load on the prep work and
     # avoids picking the same person every night.
     if preplan_only_flights:
         from .schemas import AllocationRow, AllocationSheet
-        handler_set = (
-            set(elig_ctx.p2f_handler_by_shift.values())
-            | set(elig_ctx.norse_handler_ids)
-        )
+        handler_set = set(elig_ctx.p2f_handler_by_shift.values())
         n_pool = [
             s for s in staff_today
             if s.shift_today == "N"
@@ -1566,13 +1433,10 @@ def run(
                 sheet_target=AllocationSheet.NIGHT_OPS,
                 is_international=f.is_international,
             ))
-    # Pass flights so the summary can exclude P2F + NORSE from the
-    # workload count (per user direction 2026-05-10). Also pass the
-    # combined post-pass reason notes (INTL §2 + P2F §3) so they
-    # appear in the violations column.
+    # Pass the combined post-pass reason notes (INTL §2 + P2F §3) so
+    # they appear in the violations column.
     summary = build_workload_summary(
         staff_today, result_assignments,
-        flights=list(flights) + zero_elig_flights,
         extra_reasons=dict(merged_workload_notes),
         # Neetu fix (2026-05-12): pass rows so counts come from the
         # exact list the writer will emit, not the reconstructed dict.

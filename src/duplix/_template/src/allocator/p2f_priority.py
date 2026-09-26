@@ -21,16 +21,17 @@ can never make the model infeasible:
   (if two handlers could take it, the choice is left to the solver);
 * at most ``per_handler_limit`` (H17: 8) per handler, and never more than
   the handler's own hard cap (H16);
-* two reserved P2F flights for one handler must respect H10 spacing,
-  unless the operator waived that pair;
+* two reserved P2F flights for one handler must be at least 30 min
+  apart (H10), unless the operator waived that pair;
 * a flight is skipped when a normal flight already pinned to the handler
   (re-solve mode) is too close to it, or when it is pinned elsewhere.
 
 Anything skipped is returned with a reason so the caller can log it. Those
 flights are still allocated by the solver, just without the reservation.
 
-The module only needs flights with ``unique_id``, ``date``, ``std`` and
-``ops_class`` — no solver dependency — so it is cheap to unit test.
+The module only needs flights with ``unique_id``, ``date``, ``std``,
+``ops_class`` and ``is_international`` — no solver dependency — so it is
+cheap to unit test.
 """
 
 from __future__ import annotations
@@ -40,7 +41,7 @@ from collections.abc import Collection, Iterable, Mapping
 from datetime import date as date_t
 
 from ..schemas import OpsClass
-from .windows import required_spacing_min, std_to_ops_day_minutes
+from .windows import SpacingKey, spacing_clear, spacing_key
 
 # H17: no handler is asked to do more than this many P2F flights a day.
 P2F_PER_HANDLER_LIMIT = 8
@@ -68,10 +69,7 @@ def select_p2f_priority(
     pinned = dict(pinned_assignments or {})
     handler_set = set(handler_ids)
     flight_list = list(flights)
-    std_of = {
-        f.unique_id: std_to_ops_day_minutes(f.std, f.date, ops_day)
-        for f in flight_list
-    }
+    key_of = {f.unique_id: spacing_key(f, ops_day) for f in flight_list}
 
     reserved: dict[str, str] = {}
     skipped: list[tuple[str, str]] = []
@@ -92,10 +90,10 @@ def select_p2f_priority(
     # Times of ordinary flights already pinned to each handler (re-solve
     # mode). A reserved P2F flight must keep H10 spacing from these.
     p2f_uids = {f.unique_id for fl in by_handler.values() for f in fl}
-    pinned_normal_std: dict[str, list[int]] = defaultdict(list)
+    pinned_normal: dict[str, list[SpacingKey]] = defaultdict(list)
     for uid, eid in pinned.items():
-        if eid in by_handler and uid in std_of and uid not in p2f_uids:
-            pinned_normal_std[eid].append(std_of[uid])
+        if eid in by_handler and uid in key_of and uid not in p2f_uids:
+            pinned_normal[eid].append(key_of[uid])
 
     def _waived(uid_a: str, uid_b: str, emp: str) -> bool:
         return (
@@ -109,7 +107,7 @@ def select_p2f_priority(
         # anyway), then earliest STD.
         ordered = sorted(
             p2f_flights,
-            key=lambda f: (pinned.get(f.unique_id) != handler, std_of[f.unique_id]),
+            key=lambda f: (pinned.get(f.unique_id) != handler, key_of[f.unique_id][0]),
         )
         taken: list = []
         for f in ordered:
@@ -121,15 +119,12 @@ def select_p2f_priority(
             if len(taken) >= limit:
                 skipped.append((uid, f"handler already has {limit} reserved (H17/H16)"))
                 continue
-            here = std_of[uid]
+            here = key_of[uid]
             clash = next(
                 (
                     o for o in taken
                     if not _waived(uid, o.unique_id, handler)
-                    and abs(here - std_of[o.unique_id]) < required_spacing_min(
-                        min(here, std_of[o.unique_id]),
-                        max(here, std_of[o.unique_id]),
-                    )
+                    and not spacing_clear(here, [key_of[o.unique_id]])
                 ),
                 None,
             )
@@ -138,10 +133,7 @@ def select_p2f_priority(
                     (uid, f"too close to reserved P2F {clash.unique_id} (H10)")
                 )
                 continue
-            if any(
-                abs(here - other) < required_spacing_min(min(here, other), max(here, other))
-                for other in pinned_normal_std.get(handler, ())
-            ):
+            if not spacing_clear(here, pinned_normal.get(handler, ())):
                 skipped.append((uid, "too close to a flight already pinned to the handler"))
                 continue
             taken.append(f)

@@ -37,6 +37,12 @@ solver:
   max_seconds: 700
   deficit_penalty_lambda: 100   # legacy knob; ignored by lex objective, kept for API compat
 
+  # CPU cores for CP-SAT's parallel portfolio search. 0 = auto (all cores,
+  # capped at 8). This does not change what the solver will accept as a
+  # final answer (same max_seconds, same 0%-gap requirement on a cold
+  # solve) — it only searches more of the space per wall-clock second.
+  num_workers: 0
+
 # State / cycle-history.
 state:
   staleness_max_days: 2          # plan §7.6 W003 threshold
@@ -50,7 +56,7 @@ io:
     # ARR/Dest., STD/Dep., TYPE/A/C Type, LOAD/Pax Load) map to the same
     # raw-row field so the reader picks up whichever is present. STA,
     # AC-subtype, and Aircraft Owner are not in the new export — flights
-    # default to no-NORSE-owner / blank subtype.
+    # default to blank owner / blank subtype.
     columns:                     # source-col -> raw-row field (per §4.3)
       FLT:           flight_id
       "Flight No.":  flight_id
@@ -176,7 +182,7 @@ status:
   unrecognized_treatment: OTHER
 
 # ---------- Aircraft type -> ops_class lookup ----------
-# Per §4.13: day/night split is by date; other ops_classes (p2f, ferry, norse, test)
+# Per §4.13: day/night split is by date; other ops_classes (p2f, ferry, test)
 # are derived from aircraft_type. Initial mapping below is a placeholder seeded from
 # the sample's TYPE values (G, H, J, K, P, T, X) — refine as user confirms semantics.
 # Any TYPE not listed falls through to date-based day/night routing.
@@ -218,14 +224,12 @@ p2f_adjustment:
   tolerance_minutes: 30
   logic_v2: false
 
-ops_class_norse_owner_codes:
-  # NORSE flights are identified by the Aircraft Owner column (per user
-  # direction 2026-05-11). Case-insensitive equality match against any
-  # code below routes the flight to NORSE. Replaces the legacy
-  # (TYPE, Aircraft) compound rule — owners are explicit in the new
-  # export, so we no longer triangulate via type+subtype.
-  - N0
-  - AC-789
+# Floating mid-shift break (allocator/postpass_break.py). Every on-shift
+# staff member gets one flight-free window of this many minutes, kept
+# out of the first and last hour of their shift. Editable from the
+# Setup sidebar (15-120). Picked up on the next Allocate run.
+break_pass:
+  length_minutes: 30
 
 # ---------- GULF routing (2026-05-19) ----------
 # A flight is GULF when its DEP airport is in the list below OR its

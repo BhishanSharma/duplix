@@ -9,7 +9,7 @@ Flow:
         - flights to be planned, per ops_class and per shift window
         - staff on shift today, per shift
         - recommendations: day/night headcount, P2F handlers (1 per 8
-          P2F flights per shift), NORSE handlers (1 per 10 NORSE)
+          P2F flights per shift)
         - the gap, if any
   4. Store it on ``state.plan_summary`` / ``state.plan_text`` and print
      a readable version to the server console.
@@ -33,7 +33,6 @@ from .step2_extract_roster import run as run_step2
 
 # Operational ceilings used for recommendations.
 P2F_FLIGHTS_PER_HANDLER = 8
-NORSE_FLIGHTS_PER_HANDLER = 10
 TARGET_FLIGHTS_PER_STAFF_DAY = 22  # STAFF day-shift acceptable
 TARGET_FLIGHTS_PER_STAFF_NIGHT = 19  # STAFF night-shift acceptable
 
@@ -95,7 +94,6 @@ def _format_summary(
     p2f_handlers_needed = sum(
         _ceil_div(n, P2F_FLIGHTS_PER_HANDLER) for n in p2f_per_shift.values()
     )
-    norse_handlers_needed = _ceil_div(flights["norse"], NORSE_FLIGHTS_PER_HANDLER)
 
     lines: list[str] = []
     lines.append(f"=== Plan summary for D={d_day.isoformat()} ===\n")
@@ -106,7 +104,6 @@ def _format_summary(
                  f"per shift: M={p2f_per_shift.get('M', 0)} "
                  f"A={p2f_per_shift.get('A', 0)} "
                  f"N={p2f_per_shift.get('N', 0)}")
-    lines.append(f"  NORSE:    {flights['norse']:5d}")
     lines.append(f"  Ferry:    {flights['ferry']:5d}")
     lines.append(f"  Charter:  {flights['charter']:5d}")
     lines.append(f"  Test:     {flights['test']:5d}")
@@ -135,10 +132,6 @@ def _format_summary(
         f"  P2F handlers needed (1 per {P2F_FLIGHTS_PER_HANDLER} flights): "
         f"{p2f_handlers_needed}"
     )
-    lines.append(
-        f"  NORSE handlers needed (1 per {NORSE_FLIGHTS_PER_HANDLER} flights): "
-        f"{norse_handlers_needed}"
-    )
     lines.append("")
     lines.append("NEXT STEP")
     if day_gap or night_gap:
@@ -160,7 +153,6 @@ def _format_summary(
         "day_gap": day_gap,
         "night_gap": night_gap,
         "p2f_handlers_needed": p2f_handlers_needed,
-        "norse_handlers_needed": norse_handlers_needed,
     }
     return text, payload
 

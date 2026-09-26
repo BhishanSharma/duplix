@@ -1,9 +1,14 @@
-/* Nominated handlers — the P2F slot per shift, plus the single NORSE
- * slot.
+/* Nominated handlers — the P2F slot per shift.
  *
  * P2F handlers are auto-picked from STAFF roster cells marked M/P2F,
- * A/P2F, N/P2F. NORSE has no roster shorthand: it comes from an
- * override row, or the engine auto-picks a non-N ZC.
+ * A/P2F, N/P2F, topped up by type=p2f override rows.
+ *
+ * This is also the Allocate gate: a nomination only counts if the
+ * named person is actually on that shift TODAY (the same check the
+ * solver's W212 warning makes) — a stale or mistyped override used to
+ * look fine here and only fail once Allocate ran. Now /api/handlers
+ * validates it up front and Allocate stays disabled until every shift
+ * with P2F flights has enough valid handlers.
  */
 
 import { $, escapeHTML } from "../core/dom.js";
@@ -14,78 +19,100 @@ const P2F_SHIFTS = ["M", "A", "N"];
 
 export const template = `
   <div class="block" id="handlers-block" hidden>
-    <h2>Nominated handlers — <span id="handlers-date">—</span></h2>
+    <h2>P2F handlers required today — <span id="handlers-date">—</span></h2>
     <p class="subdued">P2F handlers are auto-picked from STAFF roster cells
-      marked <code>M/P2F</code>, <code>A/P2F</code>, <code>N/P2F</code>.
-      NORSE handler comes from a nomination.
-      Edit via the <strong>Handler Assign</strong> panel on the dashboard.</p>
+      marked <code>M/P2F</code>, <code>A/P2F</code>, <code>N/P2F</code>, or
+      nominated via the <strong>Handler Assign</strong> panel — one handler
+      per 8 P2F flights in a shift. <strong>Allocate stays disabled</strong>
+      until every shift below is covered.</p>
     <div class="stat-grid" id="handlers-grid"></div>
+    <div id="handlers-issues"></div>
   </div>`;
 
 export async function load() {
   await store.handlers.load();
-  const h = store.handlers.data;
   render();
-  return h;
+  return store.handlers.data;
 }
 
-function p2fCard(shift, nominee) {
-  if (!nominee) {
+/** True once Plan has run and every shift with P2F flights has enough
+ *  validly-nominated handlers. Before Plan has run there's nothing to
+ *  gate on yet, so this returns true (the "no Plan yet" empty state is
+ *  handled by /api/run itself, and by run.js disabling everything
+ *  while a run is in flight). */
+export function isReady() {
+  const h = store.handlers.data;
+  return !h || h.ready !== false;
+}
+
+/** Applies the current readiness to the Allocate button. Exported so
+ *  run.js can re-derive it after clearing the "busy" disabled state,
+ *  without needing a fresh fetch. */
+export function applyAllocateGate() {
+  const btn = $("#run-btn");
+  if (!btn) return;
+  const ready = isReady();
+  btn.disabled = !ready;
+  btn.title = ready
+    ? ""
+    : "Nominate a valid P2F handler for every shift listed below "
+      + "(see the Handler panel) before allocating.";
+}
+
+function shiftCard(shift, h) {
+  const status = (h.shift_status || {})[shift] || "not_needed";
+  const required = (h.required_by_shift || {})[shift] || 0;
+  const have = (h.valid_count_by_shift || {})[shift] || 0;
+  const names = (h.p2f || [])
+    .filter((p) => p.shift === shift)
+    .map((p) => escapeHTML(p.name));
+
+  if (status === "not_needed") {
     return `
-      <div class="stat-card handler-card handler-missing">
-        <div class="stat-value">— not nominated —</div>
-        <div class="stat-label">P2F handler — <code>${escapeHTML(shift)}</code></div>
+      <div class="stat-card handler-card">
+        <div class="stat-value">—</div>
+        <div class="stat-label">P2F handler — <code>${escapeHTML(shift)}</code>
+          <span class="subdued">(no P2F flights this shift)</span></div>
       </div>`;
   }
-  const src = nominee.source === "roster" ? "from roster" : "nominated";
+  if (status === "missing") {
+    return `
+      <div class="stat-card handler-card handler-missing">
+        <div class="stat-value">${have} of ${required} nominated</div>
+        <div class="stat-label">P2F handler — <code>${escapeHTML(shift)}</code>
+          <span class="subdued">needs ${required - have} more</span></div>
+      </div>`;
+  }
   return `
     <div class="stat-card handler-card">
-      <div class="stat-value">${escapeHTML(nominee.name)}</div>
+      <div class="stat-value">${names.join(", ") || `${have} of ${required}`}</div>
       <div class="stat-label">P2F handler — <code>${escapeHTML(shift)}</code>
-        <span class="subdued">(${escapeHTML(src)})</span></div>
+        <span class="subdued">(${have} of ${required} needed)</span></div>
     </div>`;
-}
-
-function norseCards(norse) {
-  if (!norse.length) {
-    return `
-      <div class="stat-card handler-card handler-missing">
-        <div class="stat-value">— not assigned —</div>
-        <div class="stat-label">NORSE handler</div>
-      </div>`;
-  }
-  return norse.map((n) => {
-    const isAuto = n.source === "auto-pick";
-    const src = isAuto
-      ? '<span class="subdued">(auto-picked — nominate via Handler Assign if needed)</span>'
-      : '<span class="subdued">(nominated)</span>';
-    return `
-      <div class="stat-card handler-card${isAuto ? " handler-auto" : ""}">
-        <div class="stat-value">${escapeHTML(n.name)}</div>
-        <div class="stat-label">NORSE handler ${src}</div>
-      </div>`;
-  }).join("");
 }
 
 export function render() {
   const h = store.handlers.data;
   const block = $("#handlers-block");
-  if (!block) return;
-  if (!h) { block.hidden = true; return; }
-
-  // Show whenever there's data. This used to gate on the Override
-  // button being visible ("plan has run"), which race-conditioned with
-  // the plan readback: handlers could load first, see the button still
-  // hidden, and hide the block despite having data to show.
-  const hasData = (h.p2f && h.p2f.length > 0)
-    || (h.norse && h.norse.length > 0)
-    || (h.missing_p2f_shifts && h.missing_p2f_shifts.length > 0);
-  if (!hasData) { block.hidden = true; return; }
-
-  block.hidden = false;
-  $("#handlers-date").textContent = h.run_date || "—";
-  const byShift = new Map((h.p2f || []).map((p) => [p.shift, p]));
-  $("#handlers-grid").innerHTML =
-    P2F_SHIFTS.map((s) => p2fCard(s, byShift.get(s))).join("")
-    + norseCards(h.norse || []);
+  if (block) {
+    if (!h) {
+      block.hidden = true;
+    } else {
+      const hasData = (h.p2f && h.p2f.length > 0)
+        || Object.values(h.required_by_shift || {}).some((n) => n > 0);
+      block.hidden = !hasData;
+      if (hasData) {
+        $("#handlers-date").textContent = h.run_date || "—";
+        $("#handlers-grid").innerHTML =
+          P2F_SHIFTS.map((s) => shiftCard(s, h)).join("");
+        const issues = h.issues || [];
+        $("#handlers-issues").innerHTML = issues.length
+          ? `<ul class="handler-issues">${issues
+              .map((msg) => `<li>${escapeHTML(msg)}</li>`)
+              .join("")}</ul>`
+          : "";
+      }
+    }
+  }
+  applyAllocateGate();
 }

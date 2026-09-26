@@ -49,9 +49,9 @@ from .eligibility import (
     check as elig_check,
 )
 from .windows import (
-    P2F_HARD_BLOCK_BEFORE_HRS,
-    P2F_WINDOW_HALF_MIN,
-    required_spacing_min,
+    in_p2f_block,
+    spacing_clear,
+    spacing_key,
     std_to_ops_day_minutes,
 )
 
@@ -104,21 +104,15 @@ def _h10_conflict_other_std(
     ops_day: date_t,
 ) -> FlightInput | None:
     """Return the FIRST flight on a candidate staff's day-list whose
-    STD is within the band-aware spacing floor of ``flight``'s STD.
+    STD is within the H10 spacing floor of ``flight``'s STD (15 min,
+    30 for domestic→INTL and for two P2F flights).
     None if no conflict.
     """
-    flight_min = std_to_ops_day_minutes(
-        flight.std, flight.date, ops_day,
-    )
+    key = spacing_key(flight, ops_day)
     for other in candidate_assignments:
         if other.unique_id == flight.unique_id:
             continue
-        other_min = std_to_ops_day_minutes(
-            other.std, other.date, ops_day,
-        )
-        if abs(other_min - flight_min) < required_spacing_min(
-            flight_min, other_min,
-        ):
+        if not spacing_clear(key, [spacing_key(other, ops_day)]):
             return other
     return None
 
@@ -128,9 +122,9 @@ def _is_p2f_buffer_blocked(
     staff: StaffMember,
     ctx: EligibilityContext,
 ) -> bool:
-    """True iff F6's P2F D-3hr buffer would reject this (flight, staff)
-    pair.  Mirrors the check in ``eligibility.check`` F6 so we can
-    detect it for the recommender."""
+    """True iff F6's P2F buffer (STD-2hrs to STD+1hr) would reject this
+    (flight, staff) pair.  Mirrors the check in ``eligibility.check`` F6
+    so we can detect it for the recommender."""
     anchors = ctx.p2f_flight_minutes_by_handler.get(
         staff.employee_id, [],
     )
@@ -139,9 +133,7 @@ def _is_p2f_buffer_blocked(
     target = std_to_ops_day_minutes(
         flight.std, flight.date, ctx.ops_day,
     )
-    half = P2F_WINDOW_HALF_MIN
-    offset = -P2F_HARD_BLOCK_BEFORE_HRS * 60
-    return any(abs(target - (a + offset)) <= half for a in anchors)
+    return in_p2f_block(target, anchors)
 
 
 def _suggestions_for_flight(
@@ -162,19 +154,14 @@ def _suggestions_for_flight(
     # candidate to find which hard constraint blocked them.
     eligible_ids = matrix.get(flight.unique_id, set())
     staff_by_id = {s.employee_id: s for s in staff_today}
-    # 2026-05-22: only count flights that go against the cap. NORSE
-    # flights are exempt for the NORSE handler (CLAUDE.md: "NORSE
-    # handler's regular cap is independent of how many NORSE flights
-    # they take"); P2F flights are exempt for the P2F handler. If we
-    # don't filter, NORSE-handling ZCs get bogus "21/15" displays and
-    # the recommender wrongly flags them as overflow candidates for
+    # 2026-05-22: only count flights that go against the cap. P2F
+    # flights are exempt for the P2F handler. If we don't filter, the
+    # recommender wrongly flags handlers as overflow candidates for
     # every unallocated domestic flight in their morning.
     from ..schemas import OpsClass as _OC
     def _cap_relevant_count(eid: str) -> int:
         n = 0
         for f in flights_per_staff.get(eid, []):
-            if f.ops_class == _OC.NORSE:
-                continue   # NORSE handler exemption
             if f.ops_class == _OC.P2F:
                 continue   # P2F handler exemption (4-slot adjustment already removes domestic neighbours)
             n += 1
@@ -245,7 +232,6 @@ def _suggestions_for_flight(
                 ops_day=elig_ctx.ops_day,
                 p2f_handler_by_shift=elig_ctx.p2f_handler_by_shift,
                 p2f_flight_minutes_by_handler={},  # blank → no buffer
-                norse_handler_ids=elig_ctx.norse_handler_ids,
             )
             reason = elig_check(flight, s, elig_no_buffer)
             if reason is None:

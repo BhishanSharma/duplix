@@ -22,7 +22,7 @@ Logic:
   one of S's first-N (PLANNED_BY) AND in S's tail-ext (RELIEVED_BY)
   simultaneously. Rare but supported.
 
-  Sheet routing (sheet_target_for from eligibility.py): NORSE → NORSE,
+  Sheet routing (sheet_target_for from eligibility.py):
   P2F → P2F, N-shift → NightOps, everything else → DayOps. Cross-date
   flights (e.g., 05:10 D+1 STD with M staff) follow the STAFF's shift,
   NOT the calendar date — so they go to DayOps not NightOps.
@@ -172,22 +172,17 @@ def assemble_allocation_rows(
         flights_by_staff[sid].sort(
             key=lambda f: std_to_ops_day_minutes(f.std, f.date, ops_day),
         )
-    # 2026-05-26 fix: skip INTL and NORSE flights when assigning a
-    # "position" within the staff's day. Both classes have ``planned_by``
-    # blanked further down — counting them as positions 0/1/2 silently
-    # eats a pair partner's preplan_count slot, leaving the staff's
-    # first *visible* flights unplanned. Concrete symptom: a Night staff
-    # whose 21:40 flight is the first leg of an A→N partner's count=3
-    # window, but whose 21:40 leg happens to be NORSE — output showed
-    # flight 1 unplanned and only flights 2-3 planned. Skipping the
-    # INTL/NORSE flights here keeps the "first 3 plannable flights"
-    # invariant on the visible output.
-    from ..schemas import OpsClass as _OC_pos
+    # 2026-05-26 fix: skip INTL flights when assigning a "position"
+    # within the staff's day. INTL rows have ``planned_by`` blanked
+    # further down — counting them as positions 0/1/2 silently eats a
+    # pair partner's preplan_count slot, leaving the staff's first
+    # *visible* flights unplanned. Skipping them here keeps the "first
+    # 3 plannable flights" invariant on the visible output.
     position_in_staff: dict[tuple[str, str], int] = {}
     for sid, fl_list in flights_by_staff.items():
         visible_pos = 0
         for f in fl_list:
-            if f.is_international or f.ops_class == _OC_pos.NORSE:
+            if f.is_international:
                 # Not in the plannable sequence — planned_by will be
                 # blanked anyway. Map to a sentinel so planner_by_position
                 # lookups never match these flights.
@@ -266,18 +261,6 @@ def assemble_allocation_rows(
             planned_by_name = None
             relieved_by_emp = None
             relieved_by_name = None
-        # 2026-05-24 (user direction): NORSE flights also leave
-        # planned_by / relieved_by blank. NORSE handlers don't operate
-        # the flight — they batch-email pax loads for every NORSE leg
-        # together in a few minutes, so there's no shift handover to
-        # annotate. Surfacing pair-map names on NORSE rows was
-        # operational noise.
-        from ..schemas import OpsClass as _OC_norse
-        if f.ops_class == _OC_norse.NORSE:
-            planned_by_emp = None
-            planned_by_name = None
-            relieved_by_emp = None
-            relieved_by_name = None
 
         warning = _build_warning(f, s, pos, flights_by_staff[sid], ops_day)
         sheet = sheet_target_for(f, s)
@@ -334,7 +317,7 @@ def relabel_pair_columns(
             key=lambda r: std_to_ops_day_minutes(r.std, r.date, ops_day),
         )
 
-    # Visible-position map: INTL and NORSE flights are skipped so the
+    # Visible-position map: INTL flights are skipped so the
     # partner's preplan_count covers the first N _plannable_ flights.
     def _row_uid(r: AllocationRow) -> str:
         return (
@@ -348,9 +331,7 @@ def relabel_pair_columns(
         visible_pos = 0
         for r in fl_rows:
             uid = _row_uid(r)
-            f = flight_by_uid.get(uid)
-            is_norse = f is not None and f.ops_class == _OC.NORSE
-            if r.is_international or is_norse:
+            if r.is_international:
                 position_by_key[(sid, uid)] = -1
                 continue
             position_by_key[(sid, uid)] = visible_pos
@@ -419,20 +400,18 @@ def relabel_pair_columns(
                 relieved_by_emp = best.next_employee_id
                 relieved_by_name = best.next_name
 
-        # INTL + NORSE keep blank pair-based labels (design choice — INTL
-        # same-handler start-to-finish, NORSE handlers don't operate the
-        # leg). P2F rows USED to be blanked here too, but per the
+        # INTL keeps blank pair-based labels (design choice — INTL is
+        # same-handler start-to-finish). P2F rows USED to be blanked here too, but per the
         # 2026-05-27 direction P2F now carries host annotations populated
         # by postpass_p2f (D-3/D-1 host → planned_by, D+20 host →
         # relieved_by). Leaving P2F rows untouched here so those
         # post-pass-assigned labels survive to the output.
-        is_norse = f is not None and f.ops_class == _OC.NORSE
         is_p2f = f is not None and f.ops_class == _OC.P2F
         if is_p2f:
             # Keep whatever postpass_p2f wrote to the row.
             out.append(r)
             continue
-        if r.is_international or is_norse:
+        if r.is_international:
             planned_by_emp = None
             planned_by_name = None
             relieved_by_emp = None
@@ -450,7 +429,6 @@ def relabel_pair_columns(
 def build_workload_summary(
     staff_today: list[StaffMember],
     assignments: dict[str, str],
-    flights: list[FlightInput] | None = None,
     extra_reasons: dict[str, list[str]] | None = None,
     rows: list[AllocationRow] | None = None,
 ) -> list[WorkloadSummaryRow]:
@@ -459,10 +437,9 @@ def build_workload_summary(
     AMs and off-shift staff are excluded — they don't fly, and zero
     rows aren't useful in the summary sheet.
 
-    Per user direction 2026-05-11 (revised): ``actual`` excludes
-    NORSE flights only. P2F / FERRY / TEST / CHARTER all count toward
-    workload — they're allocated as normal flights with no per-staff
-    cap separate from H16. NORSE flights are bonus on top of the cap.
+    Per user direction 2026-05-11 (revised): every allocated flight
+    counts toward ``actual``. P2F / FERRY / TEST / CHARTER are allocated
+    as normal flights with no per-staff cap separate from H16.
 
     Per user direction 2026-05-12 (Neetu fix): when ``rows`` is provided,
     counts are derived directly from the (post-pass) AllocationRow list
@@ -475,13 +452,7 @@ def build_workload_summary(
       BHASKAR (P2F-A handler): 6 regular + 11 P2F                → actual = 17
       KULDEEP (P2F-M handler): 12 regular + 5 P2F                → actual = 17
       ANY STAFF: 18 regular + 2 ferry + 1 test + 1 charter       → actual = 22
-      RAJAN   (NORSE):        16 regular + 6 NORSE               → actual = 16
     """
-    from ..schemas import OpsClass
-    # Keyed by unique_id (per-leg), matching the rest of the pipeline.
-    ops_by_id: dict[str, OpsClass] = {}
-    if flights is not None:
-        ops_by_id = {f.unique_id: f.ops_class for f in flights}
     counts: dict[str, int] = defaultdict(int)
     if rows is not None:
         # Preferred path (Neetu fix, 2026-05-12): count from the rows
@@ -490,20 +461,9 @@ def build_workload_summary(
         for r in rows:
             if not r.staff_employee_id:
                 continue
-            uid = (
-                f"{r.flt}|{r.dep}|{r.arr}|"
-                f"{r.std.isoformat(timespec='minutes')}"
-                f"|{r.date.isoformat()}"
-            )
-            if ops_by_id.get(uid) == OpsClass.NORSE:
-                continue
             counts[r.staff_employee_id] += 1
     else:
-        for flight_uid, sid in assignments.items():
-            # Excluded from workload count: NORSE only.
-            # P2F + FERRY + TEST + CHARTER all count (user direction 2026-05-11).
-            if ops_by_id.get(flight_uid) == OpsClass.NORSE:
-                continue
+        for sid in assignments.values():
             counts[sid] += 1
     out: list[WorkloadSummaryRow] = []
     for s in staff_today:

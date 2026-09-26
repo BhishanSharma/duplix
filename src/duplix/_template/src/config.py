@@ -7,7 +7,15 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
+
+#: Floating mid-shift break length, in minutes. The bounds are shared by
+#: the config model below and the Setup sidebar's edit form: under 15 is
+#: shorter than the H10 flight spacing, and every shift is 8.5 h with the
+#: first and last hour kept break-free.
+BREAK_MINUTES_DEFAULT = 30
+BREAK_MINUTES_LOWEST = 15
+BREAK_MINUTES_HIGHEST = 120
 
 
 class _Frozen(BaseModel):
@@ -22,6 +30,12 @@ class AllocationConfig(_Frozen):
 class SolverConfig(_Frozen):
     max_seconds: int
     deficit_penalty_lambda: int
+    # CPU cores handed to CP-SAT for parallel portfolio search. 0 (default)
+    # means "auto": use every available core, capped at 8 (see
+    # solver/allocator_cpsat.py — OR-Tools' own guidance is that portfolio
+    # search gets most of its benefit by ~8 diverse workers). Set explicitly
+    # only if you know this machine should use more/fewer.
+    num_workers: int = 0
 
 
 class StateConfig(_Frozen):
@@ -98,6 +112,18 @@ class P2FAdjustmentConfig(_Frozen):
     logic_v2: bool = False
 
 
+class BreakPassConfig(_Frozen):
+    """Floating mid-shift break (``allocator/postpass_break.py``). Every
+    on-shift staff member gets one flight-free window of
+    ``length_minutes``. Editable from the Setup sidebar."""
+
+    length_minutes: int = Field(
+        default=BREAK_MINUTES_DEFAULT,
+        ge=BREAK_MINUTES_LOWEST,
+        le=BREAK_MINUTES_HIGHEST,
+    )
+
+
 class Config(_Frozen):
     allocation: AllocationConfig
     # Task 2a (2026-05-12): required_staffing removed. The per-shift
@@ -111,12 +137,6 @@ class Config(_Frozen):
     io: IOConfig
     status: StatusConfig
     ops_class_by_aircraft_type: dict[str, str] = {}
-    # NORSE classification (user direction 2026-05-11): a flight is NORSE
-    # when its Aircraft Owner column equals one of the listed carrier
-    # codes. Case-insensitive match. Replaces the legacy (TYPE, Aircraft)
-    # compound rules — the new SV portal export carries owner directly,
-    # so we no longer have to triangulate from TYPE+AC.
-    ops_class_norse_owner_codes: list[str] = []
     # GULF classification (user direction 2026-05-19): a flight is GULF
     # when EITHER its DEP airport (3-letter) is in
     # ``ops_class_gulf_dep_codes`` (default AUH / DOH / DXB), OR its
@@ -140,6 +160,7 @@ class Config(_Frozen):
     # or directly in config.yml.
     extraction_filters: list[dict[str, str]] = []
     p2f_adjustment: P2FAdjustmentConfig = P2FAdjustmentConfig()
+    break_pass: BreakPassConfig = BreakPassConfig()
 
 
 def load_config(path: Path | str) -> Config:

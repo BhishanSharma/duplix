@@ -1,9 +1,5 @@
 /* Flights distributed per shift — share of the day's allocated flights
  * each shift picked up.
- *
- * NORSE is excluded. It's a separate carve-out with its own handler
- * whose regular cap already ignores it, so counting it inflated
- * whichever shift the auto-picked handler happened to sit on.
  */
 
 import { $ } from "../core/dom.js";
@@ -23,7 +19,6 @@ export function render(allocRows, shiftByStaff) {
 
   const counts = Object.fromEntries(SHIFT_ORDER.map((s) => [s, 0]));
   for (const r of allocRows) {
-    if ((r.ops_class || "").toLowerCase() === "norse") continue;
     const shift = shiftByStaff[(r.staff || "").trim()];
     if (shift && counts[shift] !== undefined) counts[shift]++;
   }

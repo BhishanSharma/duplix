@@ -31,9 +31,16 @@ export function setRunStatus(text, kind /* "busy" | "ok" | "err" | "" */) {
 }
 
 function setButtonsBusy(busy) {
-  $("#run-btn").disabled = busy;
   $("#plan-btn").disabled = busy;
   $("#reset-btn").disabled = busy;
+  if (busy) {
+    // While a run is in flight, Allocate is off regardless of P2F
+    // readiness — re-derive that once the run settles (see below),
+    // rather than force-enabling it here.
+    $("#run-btn").disabled = true;
+  } else {
+    handlers.applyAllocateGate();
+  }
 }
 
 /** Everything derived from a solve. Dropped whenever the underlying
@@ -159,12 +166,49 @@ export async function poll() {
   }
 }
 
+function closeExportMenu() {
+  const list = $("#export-menu-list");
+  const btn = $("#export-btn");
+  if (!list || list.hidden) return;
+  list.hidden = true;
+  btn.setAttribute("aria-expanded", "false");
+  document.removeEventListener("click", onDocClickCloseExportMenu);
+}
+
+function onDocClickCloseExportMenu(e) {
+  if (!$(".export-menu")?.contains(e.target)) closeExportMenu();
+}
+
+function toggleExportMenu() {
+  const list = $("#export-menu-list");
+  const btn = $("#export-btn");
+  if (!list) return;
+  const opening = list.hidden;
+  list.hidden = !opening;
+  btn.setAttribute("aria-expanded", String(opening));
+  if (opening) {
+    // Defer so this same click doesn't immediately close it via the
+    // document listener below.
+    setTimeout(() => document.addEventListener("click", onDocClickCloseExportMenu), 0);
+  }
+}
+
 export function init() {
   $("#run-btn").addEventListener("click", triggerRun);
   $("#plan-btn").addEventListener("click", triggerPlan);
-  $("#export-btn").addEventListener("click", () => {
+
+  $("#export-btn").addEventListener("click", (e) => {
+    e.stopPropagation();
+    toggleExportMenu();
+  });
+  $("#export-xlsx-btn").addEventListener("click", () => {
+    closeExportMenu();
     // Plain navigation: the server sets Content-Disposition, so the
     // browser handles the save dialog.
     window.location.href = "/api/export.xlsx";
+  });
+  $("#export-xml-btn").addEventListener("click", () => {
+    closeExportMenu();
+    window.location.href = "/api/export/allocations.xml";
   });
 }

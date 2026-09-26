@@ -16,6 +16,7 @@ JSON_CONTENT_TYPE = "application/json"
 XLSX_CONTENT_TYPE = (
     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 )
+XML_CONTENT_TYPE = "application/xml"
 
 
 @dataclass(slots=True)
@@ -80,6 +81,7 @@ __all__ = [
     "JSON_CONTENT_TYPE",
     "Response",
     "XLSX_CONTENT_TYPE",
+    "XML_CONTENT_TYPE",
     "attachment",
     "bad_request",
     "conflict",

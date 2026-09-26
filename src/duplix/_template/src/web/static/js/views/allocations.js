@@ -28,7 +28,6 @@ export const template = `
         <option value="DayOps">DayOps</option>
         <option value="NightOps">NightOps</option>
         <option value="P2F">P2F</option>
-        <option value="NORSE">NORSE</option>
         <option value="Removed">Removed (extracted via filter / Gulf)</option>
         <option value="__intl">International</option>
         <option value="__redistributed">Redistributed (changed vs prev iter)</option>

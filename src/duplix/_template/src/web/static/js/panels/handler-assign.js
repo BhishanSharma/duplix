@@ -1,5 +1,4 @@
-/* Dashboard control for nominating the P2F handler (per shift) or the
- * NORSE handler.
+/* Dashboard control for nominating the P2F handler (per shift).
  *
  * Writes an override row (see write_staged_override) via the
  * staged-form endpoint so it applies immediately — same pattern as
@@ -14,6 +13,7 @@ import { $, escapeHTML } from "../core/dom.js";
 import { get, post } from "../core/api.js";
 import * as store from "../core/store.js";
 import * as autocomplete from "../ui/autocomplete.js";
+import * as handlersPanel from "./handlers.js";
 
 let query = "";
 let saving = false;
@@ -22,13 +22,12 @@ let notice = "";
 
 const runDate = () => ($("#run-date") || {}).value || "";
 
-/** value = "P2F:<shift>" or "NORSE"; label = what the pane shows. */
+/** value = "P2F:<shift>"; label = what the pane shows. */
 const ROLE_OPTIONS = [
   { value: "", label: "(assign as)" },
   { value: "P2F:M", label: "P2F handler — M" },
   { value: "P2F:A", label: "P2F handler — A" },
   { value: "P2F:N", label: "P2F handler — N" },
-  { value: "NORSE", label: "NORSE handler" },
 ];
 
 /** name -> current handler role label(s), from the last /api/handlers
@@ -41,11 +40,6 @@ function currentRoleLabel(name) {
   for (const nom of h.p2f || []) {
     if (nom.name && nom.name.trim().toUpperCase() === upper) {
       roles.push(`P2F — ${nom.shift}`);
-    }
-  }
-  for (const nom of h.norse || []) {
-    if (nom.name && nom.name.trim().toUpperCase() === upper) {
-      roles.push("NORSE");
     }
   }
   return roles.join(", ");
@@ -119,27 +113,20 @@ async function apply(name, roleValue) {
   if (!date) return;
   saving = true;
   try {
-    let result, ok, label;
-    if (roleValue === "NORSE") {
-      result = await post("/api/staged_form/norse", {
-        ops_date: date, employee: name,
-      });
-      ok = (result.applied || {}).norse > 0 || result.ok;
-      label = "NORSE handler";
-    } else {
-      const shift = roleValue.split(":")[1];
-      result = await post("/api/staged_form/p2f", {
-        ops_date: date, employee: name, shift,
-      });
-      ok = (result.applied || {}).p2f > 0 || result.ok;
-      label = `P2F handler (${shift})`;
-    }
+    const shift = roleValue.split(":")[1];
+    const result = await post("/api/staged_form/p2f", {
+      ops_date: date, employee: name, shift,
+    });
+    const ok = (result.applied || {}).p2f > 0 || result.ok;
+    const label = `P2F handler (${shift})`;
     notice = ok
       ? `${name} nominated as ${label}.`
       : `Saved, but couldn't confirm it took effect for ${name} — check the name and try again.`;
     // The nomination lives in override rows, read fresh by /api/handlers —
-    // reload it so the new "Currently: ..." tag shows right away.
+    // reload it so the new "Currently: ..." tag shows right away, the
+    // handler cards update, and the Allocate gate re-checks itself.
     await store.handlers.load({ force: true });
+    handlersPanel.render();
     await load();
   } catch (error) {
     alert(`Could not nominate ${name}: ${error.message}`);

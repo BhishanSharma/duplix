@@ -1,9 +1,10 @@
-"""The drawer's "Add international airport code" action.
+"""The Setup sidebar's international airport codes: list, add, remove.
 
-Appends to ``io.sv_portal.international_airport_codes`` in
-``configs/config.yml`` so the engine picks the code up on the next run
-with no manual edit step. Validation is split out from the write so the
-caller can preview the diff before anything touches the file.
+Edits ``io.sv_portal.international_airport_codes`` in
+``configs/config.yml`` so the engine picks the change up on the next run
+with no manual edit step. Validation for an add is split out from the
+write so the caller can preview the diff before anything touches the
+file.
 """
 
 from __future__ import annotations
@@ -15,6 +16,33 @@ import yaml
 from .config_yaml import CONFIG_YML, config_write_lock
 
 _INTL_CODE_RE = re.compile(r"^[A-Z]{3}$")
+_INTL_HEADER_RE = re.compile(r"^\s*international_airport_codes\s*:\s*(#.*)?$")
+_INTL_ITEM_RE = re.compile(r"^(\s*-\s+)([A-Z]{3})\s*(?:#\s*(.*))?$")
+
+
+def _find_intl_block(lines: list[str]) -> tuple[int, list[int]]:
+    """Locate the ``international_airport_codes`` list in config.yml.
+
+    Returns ``(header_idx, item_idxs)``: the header line and every
+    ``- XXX`` item line under it, in file order. ``header_idx`` is -1
+    when the section is missing.
+    """
+    header_idx = -1
+    item_idxs: list[int] = []
+    for i, ln in enumerate(lines):
+        if header_idx < 0:
+            if _INTL_HEADER_RE.match(ln):
+                header_idx = i
+            continue
+        if _INTL_ITEM_RE.match(ln):
+            item_idxs.append(i)
+            continue
+        # Stop scanning once we leave the list block: a line at
+        # less-or-equal indent than the header, or a new YAML key at
+        # the io.sv_portal level.
+        if ln.strip() and not ln.startswith(" " * 6):
+            break
+    return header_idx, item_idxs
 
 
 def _read_existing_intl_codes() -> list[str]:
@@ -111,33 +139,16 @@ def _apply_intl_airport_to_yaml(code: str, name: str = "") -> None:
     with config_write_lock:
         text = CONFIG_YML.read_text(encoding="utf-8")
         lines = text.splitlines(keepends=False)
-        header_re = re.compile(
-            r"^\s*international_airport_codes\s*:\s*(#.*)?$"
-        )
-        item_re = re.compile(r"^(\s*-\s+)[A-Z]{3}\s*(#.*)?$")
-        header_idx = -1
-        last_item_idx = -1
-        item_prefix = "      - "  # fallback if no item present yet
-        for i, ln in enumerate(lines):
-            if header_re.match(ln):
-                header_idx = i
-                continue
-            if header_idx >= 0:
-                m = item_re.match(ln)
-                if m:
-                    last_item_idx = i
-                    item_prefix = m.group(1)
-                    continue
-                # Stop scanning once we leave the list block: a line
-                # at less-or-equal indent than the header, or a new
-                # YAML key at the io.sv_portal level.
-                stripped = ln.strip()
-                if stripped and not ln.startswith(" " * 6):
-                    break
+        header_idx, item_idxs = _find_intl_block(lines)
         if header_idx < 0:
             raise ValueError(
                 "could not find international_airport_codes section in config.yml"
             )
+        item_prefix = "      - "  # fallback if no item present yet
+        last_item_idx = -1
+        if item_idxs:
+            last_item_idx = item_idxs[-1]
+            item_prefix = _INTL_ITEM_RE.match(lines[last_item_idx]).group(1)
         insert_at = (last_item_idx if last_item_idx >= 0 else header_idx) + 1
         new_line = f"{item_prefix}{code}"
         if name:
@@ -179,3 +190,72 @@ def add_intl_airport_code(code: str, name: str | None = None) -> dict[str, str]:
     _apply_intl_airport_to_yaml(sanitized_code, sanitized_name)
     return {"code": sanitized_code, "name": sanitized_name}
 
+
+def list_intl_airports() -> list[dict[str, str]]:
+    """Every configured international airport, in file order, as
+    ``{"code", "name"}``. ``name`` is the trailing ``# comment`` the add
+    form writes, or "" when there is none.
+
+    The codes come from the parsed YAML — exactly what the engine will
+    read — and the names from the raw lines, since YAML drops comments.
+    """
+    text = CONFIG_YML.read_text(encoding="utf-8")
+    lines = text.splitlines(keepends=False)
+    _, item_idxs = _find_intl_block(lines)
+    names: dict[str, str] = {}
+    for i in item_idxs:
+        m = _INTL_ITEM_RE.match(lines[i])
+        names.setdefault(m.group(2), (m.group(3) or "").strip())
+    codes = (
+        (yaml.safe_load(text) or {})
+        .get("io", {})
+        .get("sv_portal", {})
+        .get("international_airport_codes")
+    ) or []
+    out: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for c in codes:
+        code = str(c).strip().upper()
+        if not code or code in seen:
+            continue
+        seen.add(code)
+        out.append({"code": code, "name": names.get(code, "")})
+    return out
+
+
+def remove_intl_airport_code(code: str) -> dict[str, str]:
+    """Delete ``code`` from ``international_airport_codes`` in
+    ``configs/config.yml``. Returns the removed ``{"code", "name"}``.
+
+    Same targeted line splice as the add path, so the file's commentary
+    survives. Raises ``ValueError`` with a user-facing message when the
+    code isn't in the list, or when it is the last one left — an empty
+    list would leave a bare ``international_airport_codes:`` key that
+    YAML reads as null.
+    """
+    if not isinstance(code, str) or not _INTL_CODE_RE.match(code.strip()):
+        raise ValueError(f"code must be exactly 3 uppercase letters (got {code!r})")
+    code = code.strip()
+    with config_write_lock:
+        text = CONFIG_YML.read_text(encoding="utf-8")
+        lines = text.splitlines(keepends=False)
+        header_idx, item_idxs = _find_intl_block(lines)
+        if header_idx < 0:
+            raise ValueError(
+                "could not find international_airport_codes section in config.yml"
+            )
+        matches = [
+            i for i in item_idxs if _INTL_ITEM_RE.match(lines[i]).group(2) == code
+        ]
+        if not matches:
+            raise ValueError(f"{code} is not in the international list")
+        if len(matches) == len(item_idxs):
+            raise ValueError(
+                f"{code} is the last international airport code. Add "
+                "another code before removing it."
+            )
+        name = (_INTL_ITEM_RE.match(lines[matches[0]]).group(3) or "").strip()
+        for i in reversed(matches):
+            del lines[i]
+        CONFIG_YML.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return {"code": code, "name": name}

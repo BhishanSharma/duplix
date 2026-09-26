@@ -77,7 +77,6 @@ def _derive_ops_class(
     row_date: date_type,
     d_day: date_type,
     ops_map: Mapping[str, str],
-    norse_owner_codes: frozenset[str],
     gulf_dep_codes: frozenset[str],
     gulf_owner_codes: frozenset[str],
 ) -> OpsClass | None:
@@ -88,17 +87,12 @@ def _derive_ops_class(
        the cleaned row lands in the GULF class but Step 3 ignores
        that sheet, so these flights never enter the solver. Per user
        direction 2026-05-19.
-    2. NORSE — owner OR TYPE letter in ``norse_owner_codes`` (e.g.
-       ``N0``, ``AC-789``). The legacy SV portal export had a separate
-       Aircraft Owner column; the 2026-05-14 export collapsed the owner
-       code into the TYPE column (TYPE='N0' for NORSE flights), so we
-       check both fields. Per user direction 2026-05-11.
-    3. TYPE = X → TEST or FERRY based on routing (user direction
+    2. TYPE = X → TEST or FERRY based on routing (user direction
        2026-05-11):
          * dep == arr (same-airport loop) → TEST
          * dep != arr (positioning leg)   → FERRY
-    4. Flat TYPE-letter mapping — H → P2F, B → CHARTER, K/P/T/G/W → FERRY.
-    5. Date-based fallback — D → DAY, D+1 → NIGHT (J / unknown types
+    3. Flat TYPE-letter mapping — H → P2F, B → CHARTER, K/P/T/G/W → FERRY.
+    4. Date-based fallback — D → DAY, D+1 → NIGHT (J / unknown types
        routing to passenger ops).
     """
     owner_upper = (owner or "").strip().upper()
@@ -111,12 +105,6 @@ def _derive_ops_class(
         return OpsClass.GULF
     if t_upper and t_upper in gulf_owner_codes:
         return OpsClass.GULF
-    if owner_upper and owner_upper in norse_owner_codes:
-        return OpsClass.NORSE
-    # 2026-05-15: new SV portal collapses owner into TYPE — treat the
-    # TYPE letter as an owner-code candidate too.
-    if t_upper and t_upper in norse_owner_codes:
-        return OpsClass.NORSE
     if t_upper == "X":
         return OpsClass.TEST if dep == arr else OpsClass.FERRY
     if t_upper:
@@ -181,9 +169,6 @@ def clean_flights(
     # Phase 3 / Change 9: DEP-side only INTL definition.
     intl_codes = {c.upper() for c in config.io.sv_portal.international_airport_codes}
     ops_map = {k.upper(): v for k, v in config.ops_class_by_aircraft_type.items()}
-    norse_owner_codes = frozenset(
-        c.strip().upper() for c in config.ops_class_norse_owner_codes if c.strip()
-    )
     # 2026-05-19: GULF routing — extract-only sheet, never allocated.
     gulf_dep_codes = frozenset(
         c.strip().upper() for c in config.ops_class_gulf_dep_codes if c.strip()
@@ -223,7 +208,7 @@ def clean_flights(
         load = _safe_load(r.booked_pax_raw)
         ops = _derive_ops_class(
             r.aircraft_type, r.owner,
-            dep, arr, r.date, d_day, ops_map, norse_owner_codes,
+            dep, arr, r.date, d_day, ops_map,
             gulf_dep_codes, gulf_owner_codes,
         )
         if ops is None:

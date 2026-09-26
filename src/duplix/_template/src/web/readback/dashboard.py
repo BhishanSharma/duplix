@@ -35,9 +35,7 @@ def read_dashboard(state: AppState) -> dict[str, Any]:
         staff_at_risk: list[dict[str, Any]] = []
         for w in state.workload:
             # At risk = real cap violations only. Under-preferred is just
-            # a light load; above-preferred is informational; handlers
-            # exceed cap legitimately because their P2F/NORSE flights are
-            # exempt from H16.
+            # a light load; above-preferred is informational.
             joined = "; ".join(w.violations)
             lowered = joined.lower()
             if not any(p in lowered for p in (
@@ -71,7 +69,6 @@ def read_dashboard(state: AppState) -> dict[str, Any]:
                 "day_ops": by_class.get("day", 0),
                 "night_ops": by_class.get("night", 0),
                 "p2f": by_class.get("p2f", 0),
-                "norse": by_class.get("norse", 0),
                 "special_ops": sum(special_sub.values()),
                 "special_ops_test": special_sub["test"],
                 "special_ops_ferry": special_sub["ferry"],
