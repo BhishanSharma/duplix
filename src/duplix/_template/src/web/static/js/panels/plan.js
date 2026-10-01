@@ -16,14 +16,22 @@ import * as inputs from "./inputs.js";
 
 export const template = `<div id="plan-block" hidden></div>`;
 
-/** Show or hide everything that only makes sense once Plan has run.
+/** Show or hide everything that only makes sense once Plan has run:
+ *  the handler panel, the Allocate button, and the download menu — a
+ *  user shouldn't be able to click Allocate (or download a workbook)
+ *  before there's anything for it to act on.
  *  Once the handler panel is shown it stays shown — hiding it on a
  *  later refresh produced a flicker between Plan completing and the
- *  next poll. */
+ *  next poll. Allocate/download don't have that history, so they
+ *  track planHasRun directly both ways. */
 export function setPostPlanUI(planHasRun) {
   if (!planHasRun) {
     $("#handlers-block").hidden = true;
   }
+  const runBtn = $("#run-btn");
+  const exportMenu = $(".export-menu");
+  if (runBtn) runBtn.hidden = !planHasRun;
+  if (exportMenu) exportMenu.hidden = !planHasRun;
 }
 
 export async function load() {

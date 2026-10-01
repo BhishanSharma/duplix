@@ -9,6 +9,7 @@
 import { $, escapeHTML } from "../core/dom.js";
 import { api, post } from "../core/api.js";
 import * as store from "../core/store.js";
+import * as toast from "../ui/toast.js";
 
 export const id = "unallocated";
 export const label = "Unallocated";
@@ -18,7 +19,7 @@ export const pillId = "tab-unalloc-pill";
 /** Suggestion type -> the payload fields the apply POST needs.
  *  Data-driven so a fifth override type is one entry, not a branch. */
 const RECO_ROUTES = {
-  waive_h10_pair:    ["flight", "std", "employee", "other_std"],
+  waive_h10_pair:    ["flight", "std", "employee", "other_std", "other_stds"],
   raise_cap:         ["flight", "std", "employee"],
   skip_p2f_buffer:   ["flight", "std", "employee"],
   skip_intl_removal: ["flight", "std"],
@@ -222,11 +223,13 @@ async function applyStagedAndReallocate() {
     else fail++;
   }
   if (fail > 0) {
-    alert(`${ok} override(s) applied; ${fail} failed (see console). Re-allocating anyway.`);
+    toast.warn(`${ok} override(s) applied; ${fail} failed (see console). Re-allocating anyway.`);
   }
   staged.clear();
+  // Pin everything already placed so only the unallocated flights move;
+  // a plain re-solve re-optimizes the whole day and strands new flights.
   // The run status pill takes over from here.
-  await triggerRun();
+  await triggerRun({ pinPrior: true });
   if (btn) { btn.disabled = false; btn.textContent = "Apply & Reallocate"; }
 }
 
@@ -244,12 +247,14 @@ async function applyAllRecommendations() {
     if (status) {
       status.textContent =
         `Done — ${resp.applied}/${resp.total} applied, ${resp.failed} failed. `
-        + "Click Allocate to solve with the new waivers.";
+        + (resp.applied ? "Placing the unallocated flights…" : "");
       status.style.color = resp.failed ? "#8a1f1f" : "#0a5d0a";
       status.style.fontWeight = "bold";
     }
     // The new rows land in the drawer, which re-reads them when opened.
     store.invalidate("overrides");
+    // Re-solve with prior assignments locked, so only these flights move.
+    if (resp.applied) await triggerRun({ pinPrior: true });
   } catch (e) {
     if (status) {
       status.textContent = `Failed: ${e.message}`;

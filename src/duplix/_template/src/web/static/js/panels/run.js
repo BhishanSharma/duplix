@@ -10,6 +10,7 @@ import { get, post } from "../core/api.js";
 import * as store from "../core/store.js";
 import * as tabs from "../ui/tabs.js";
 import { confirmModal } from "../ui/confirm.js";
+import * as toast from "../ui/toast.js";
 import * as plan from "./plan.js";
 import * as handlers from "./handlers.js";
 import * as staffing from "./staffing.js";
@@ -26,6 +27,10 @@ export function setRunStatus(text, kind /* "busy" | "ok" | "err" | "" */) {
   const el = $("#run-status-pill");
   if (!el) return;
   el.textContent = text || "";
+  // Long server error messages get ellipsized by CSS (run-pill.css) so
+  // they can't blow out the navbar — this keeps the full text a hover
+  // away instead of just dropping it.
+  el.title = text || "";
   el.hidden = !text;
   el.className = "run-pill" + (kind ? ` run-pill-${kind}` : "");
 }
@@ -50,17 +55,17 @@ function dropDerivedCaches() {
   flightTrend.clear();
 }
 
-async function startRun(step, label) {
+async function startRun(step, label, extra = {}) {
   const date = $("#run-date").value || null;
   if (!date) {
-    alert("Pick the allocation date first.");
+    toast.warn("Pick the allocation date first.");
     return false;
   }
   try {
-    await post("/api/run", { date, step });
+    await post("/api/run", { date, step, ...extra });
   } catch (e) {
     setRunStatus(e.message, "err");
-    alert(`${label} failed to start: ${e.message}`);
+    toast.error(`${label} failed to start: ${e.message}`);
     return false;
   }
   setButtonsBusy(true);
@@ -70,9 +75,11 @@ async function startRun(step, label) {
   return true;
 }
 
-export async function triggerRun() {
+/** `pinPrior` keeps every already-placed flight where it is and only
+ *  places the unallocated ones (the Unallocated tab's recommender). */
+export async function triggerRun({ pinPrior = false } = {}) {
   mode = "allocate";
-  await startRun("all", "Allocate");
+  await startRun("all", "Allocate", pinPrior ? { pin_prior: true } : {});
 }
 
 export async function triggerPlan() {
@@ -97,7 +104,7 @@ export async function triggerReset() {
   try {
     await post("/api/run", { step: "reset" });
   } catch (e) {
-    alert(`Reset failed: ${e.message}`);
+    toast.error(`Reset failed: ${e.message}`);
     return;
   }
   plan.setPostPlanUI(false);
@@ -194,7 +201,7 @@ function toggleExportMenu() {
 }
 
 export function init() {
-  $("#run-btn").addEventListener("click", triggerRun);
+  $("#run-btn").addEventListener("click", () => triggerRun());
   $("#plan-btn").addEventListener("click", triggerPlan);
 
   $("#export-btn").addEventListener("click", (e) => {

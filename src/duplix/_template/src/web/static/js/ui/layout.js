@@ -11,12 +11,13 @@
 import { $ } from "../core/dom.js";
 import * as tabs from "./tabs.js";
 import * as confirmDialog from "./confirm.js";
+import * as toast from "./toast.js";
 import * as setup from "../sidebar/index.js";
 
 export function mount() {
   $("#tab-strip").innerHTML = tabs.stripTemplate();
   $("#panels").innerHTML = tabs.panelsTemplate();
-  $("#overlays").innerHTML = setup.template + confirmDialog.template;
+  $("#overlays").innerHTML = setup.template + confirmDialog.template + toast.template;
 }
 
 /** Escape hatches, so a render bug can never trap the operator behind
@@ -25,6 +26,7 @@ function onEscape(ev) {
   if (ev.key !== "Escape") return;
   if (confirmDialog.isOpen()) confirmDialog.resolve(false);
   else if (setup.isOpen()) setup.close();
+  else if (toast.isOpen()) toast.dismissTop();
 }
 
 /** Enter accepts the confirm dialog. */

@@ -17,6 +17,7 @@ import { get, post } from "../core/api.js";
 import * as store from "../core/store.js";
 import * as rosterChart from "../charts/roster.js";
 import * as autocomplete from "../ui/autocomplete.js";
+import * as toast from "../ui/toast.js";
 
 let query = "";
 let saving = false;
@@ -129,7 +130,7 @@ async function apply(name, newShift) {
     await store.staffNames.load({ force: true });
     rosterChart.render(store.staffNames.data);
   } catch (error) {
-    alert(`Could not change ${name}'s shift: ${error.message}`);
+    toast.error(`Could not change ${name}'s shift: ${error.message}`);
   } finally {
     saving = false;
   }

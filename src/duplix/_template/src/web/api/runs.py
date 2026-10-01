@@ -83,7 +83,9 @@ def register(router: Router) -> None:
                 })
 
         STATE.run_date = d_day
-        if not runner.trigger(STATE, d_day, step):
+        if not runner.trigger(
+            STATE, d_day, step, pin_prior=body.get("pin_prior") is True,
+        ):
             return conflict({"error": "another run is in progress"})
         return json_response({"started": True, "step": step})
 

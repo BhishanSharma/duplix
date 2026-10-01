@@ -53,6 +53,13 @@
   align-items: center;
 }
 
+/* The status pill is the one topbar-actions child allowed to shrink —
+   a long error message truncates (see run-pill.css) instead of
+   squeezing the date field or pushing buttons out of the bar. */
+.topbar-actions > *:not(#run-status-pill) {
+  flex-shrink: 0;
+}
+
 .topbar-actions input[type="date"] {
   padding: 5px 8px;
   border: 1px solid var(--line);

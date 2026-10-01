@@ -377,6 +377,7 @@ def run(
     append_warnings: bool = True,
     mode_label: str = "Step 4",
     solution_hints: dict[str, str] | None = None,
+    pin_prior: bool = False,
 ) -> dict[str, int]:
     """Step 4 orchestrator. Reads state, runs the solver, writes back.
 
@@ -387,6 +388,12 @@ def run(
     map, used as a CP-SAT warm start. When None it is auto-built from
     the allocations still on the state. Hints are silently ignored if no
     longer feasible.
+
+    ``pin_prior`` is the minimal-change re-solve used by the Unallocated
+    tab's recommender buttons: every prior assignment is locked in place
+    and the whole-day leveling/break post-passes are skipped, so only the
+    flights that were unallocated get placed. Without it the overrides
+    just loosen constraints and the solver re-optimizes the entire day.
     """
     config: Config = load_config(config_path)
     started = _time.monotonic()
@@ -1002,7 +1009,7 @@ def run(
     # 22 to 14-15, so extra flights MUST redistribute; and
     # STAFF/ZC->AM: all their flights become unallocated, then redist).
     free_for_redist: set[str] = set()
-    if sick_employee_ids or role_changes:
+    if sick_employee_ids or role_changes or pin_prior:
         name_lookup = {s.name.strip().upper(): s.employee_id for s in staff_today}
         for raw in (sick_employee_ids or []):
             if any(s.employee_id == raw for s in staff_today):
@@ -1026,8 +1033,8 @@ def run(
                 pinned_assignments[uid] = eid
         if pinned_assignments:
             print(
-                f"  Sick re-solve: pinned {len(pinned_assignments)} prior "
-                f"assignment(s); only sick staff's flights free to move"
+                f"  Re-solve: pinned {len(pinned_assignments)} prior "
+                f"assignment(s); only freed / unallocated flights can move"
             )
 
     # --- Solve ----------
@@ -1249,11 +1256,18 @@ def run(
     # spacing, and hard caps — it only re-picks who among already-
     # eligible people does which flight.
     from .allocator.postpass_rebalance import apply_rebalance_pass
-    rows, rebalance_summary = apply_rebalance_pass(
-        rows, flights, staff_today, matrix,
-        p2f_handlers=elig_ctx.p2f_handler_by_shift,
-        d_day=d_day,
-    )
+    if pin_prior:
+        # Minimal-change re-solve: leveling would move already-placed
+        # flights between staff, which is exactly what the operator
+        # asked us not to do.
+        from .allocator.postpass_rebalance import RebalanceSummary
+        rebalance_summary = RebalanceSummary()
+    else:
+        rows, rebalance_summary = apply_rebalance_pass(
+            rows, flights, staff_today, matrix,
+            p2f_handlers=elig_ctx.p2f_handler_by_shift,
+            d_day=d_day,
+        )
     if rebalance_summary.n_transfers:
         print(
             f"  Rebalance pass: buckets_checked="
@@ -1272,11 +1286,66 @@ def run(
     # soft/best-effort, via 1-for-1 swaps only — never changes
     # anyone's flight count, so it can't disturb the H18/rebalance
     # workload spread above. Runs LAST, against the final schedule.
-    from .allocator.postpass_break import apply_break_pass
-    rows, break_summary = apply_break_pass(
-        rows, flights, staff_today, matrix, d_day,
-        break_len=config.break_pass.length_minutes,
+    # 2026-10-01 (user direction): everyone except N-shift gets ONE
+    # reliever (a reliever relieves only one person). Staff left without
+    # one are released early instead — their last hour is cleared of
+    # flights — and who that is rotates day to day. Runs BEFORE the break
+    # pass, which is told not to give released staff late flights back.
+    from . import relief_store
+    from .allocator.relievers import plan_relief
+    rows, relief_plan = plan_relief(
+        rows, flights, staff_today, matrix, d_day, pairs,
+        free_early_min=config.relief_pass.free_early_minutes,
+        history=relief_store.history_counts(d_day),
+        move_flights=not pin_prior,
     )
+    relief_store.record(d_day, relief_plan.freed)
+    print(
+        f"  Relief pass: relieved={len(relief_plan.reliever_of)} "
+        f"released_early={len(relief_plan.freed)} "
+        f"uncovered={len(relief_plan.uncovered)} "
+        f"swaps={relief_plan.n_swaps} transfers={relief_plan.n_transfers}"
+    )
+    for line in relief_plan.log_lines[:20]:
+        print(f"  relief: {line}")
+    _sb = {x.employee_id: x for x in staff_today}
+
+    def _names_capped(ids, sb, cap=10):
+        names = sorted(sb[i].name for i in ids)
+        extra = len(names) - cap
+        return ", ".join(names[:cap]) + (f" and {extra} more" if extra > 0 else "")
+
+    if relief_plan.freed:
+        warnings.append(WarningRow(
+            severity=Severity.INFO, code="W240", date=d_day,
+            message=(
+                f"{len(relief_plan.freed)} staff have no reliever today and "
+                f"were released {config.relief_pass.free_early_minutes} min "
+                "before shift end (no flights in that window): "
+                + _names_capped(relief_plan.freed, _sb)
+                + ". Who is released rotates day to day."
+            ),
+        ))
+    if relief_plan.uncovered:
+        warnings.append(WarningRow(
+            severity=Severity.WARN, code="W241", date=d_day,
+            message=(
+                f"{len(relief_plan.uncovered)} staff have no reliever and "
+                "their last hour could not be cleared of flights: "
+                + _names_capped(relief_plan.uncovered, _sb)
+            ),
+        ))
+
+    from .allocator.postpass_break import apply_break_pass
+    if pin_prior:
+        from .allocator.postpass_break import BreakSummary
+        break_summary = BreakSummary()
+    else:
+        rows, break_summary = apply_break_pass(
+            rows, flights, staff_today, matrix, d_day,
+            break_len=config.break_pass.length_minutes,
+            max_std_by_staff=relief_plan.freed,
+        )
     print(
         f"  Break pass ({config.break_pass.length_minutes} min): "
         f"considered={break_summary.n_staff_considered} "
@@ -1301,6 +1370,8 @@ def run(
         merged_workload_notes[sid].extend(msgs)
     for sid, msgs in break_summary.workload_notes.items():
         merged_workload_notes[sid].extend(msgs)
+    for sid, msgs in relief_plan.workload_notes.items():
+        merged_workload_notes[sid].extend(msgs)
 
     # 2026-05-26 fix: post-passes displace flights between staff via
     # ``_set_assignee``, which updates the row's staff fields but
@@ -1309,8 +1380,76 @@ def run(
     # showed staff=Priya AND planned_by=Kunal — even though Kunal-
     # Priya isn't a pair. Re-derive the labels against each row's
     # CURRENT staff so the allocations match the pair map.
+    # --- Zero-unallocated guarantee (operator direction 2026-10-01) ----------
+    # Whatever the solver and post-passes could not place — including the
+    # zero-eligibility flights dropped before the solve — still gets a
+    # person. Spacing below 15 / 30 min, a cap overrun, or an ineligible
+    # handler are all acceptable here; each is flagged on the row and in
+    # Warnings so the assigner can see exactly what was relaxed.
+    def _row_uid(r):
+        return (
+            f"{r.flt}|{r.dep}|{r.arr}|{r.std.isoformat(timespec='minutes')}"
+            f"|{r.date.isoformat()}"
+        )
+
+    _all_flights = list(flights) + list(zero_elig_flights)
+    _placed = {_row_uid(r): r.staff_employee_id for r in rows if r.staff_employee_id}
+    _leftover = [f for f in _all_flights if f.unique_id not in _placed]
+    if _leftover:
+        from .allocator.force_place import force_place_remaining
+        from .allocator.postsolve import assemble_allocation_rows as _assemble
+        _forced = force_place_remaining(
+            _leftover, staff_today, _placed, _all_flights,
+            ops_day=d_day, elig_ctx=elig_ctx,
+            max_std_by_staff=relief_plan.freed,
+        )
+        _forced_assign = {fp.flight.unique_id: fp.employee_id for fp in _forced}
+        _forced_rows = _assemble(
+            [fp.flight for fp in _forced], staff_today, _forced_assign,
+            pairs, d_day,
+        )
+        _note_by_uid = {fp.flight.unique_id: fp for fp in _forced}
+        _prefixes = tuple(
+            f"flight {fp.flight.flt} (STD "
+            f"{fp.flight.std.isoformat(timespec='minutes')}) has zero eligible"
+            for fp in _forced
+        )
+        # The W201 "left UNALLOCATED" errors are no longer true.
+        warnings[:] = [
+            w for w in warnings
+            if not (w.code == "W201" and w.message.startswith(_prefixes))
+        ]
+        for fr in _forced_rows:
+            fp = _note_by_uid.get(_row_uid(fr))
+            if fp is None:
+                continue
+            tag = "FORCED: " + fp.summary
+            rows.append(fr.model_copy(update={
+                "warning": f"{fr.warning}; {tag}" if fr.warning else tag,
+            }))
+        for fp in _forced:
+            if not fp.notes:
+                continue   # placed without relaxing anything
+            warnings.append(WarningRow(
+                severity=Severity.WARN, code="W230", date=d_day,
+                name=fp.staff_name,
+                message=(
+                    f"flight {fp.flight.flt} (STD "
+                    f"{fp.flight.std.isoformat(timespec='minutes')}) was "
+                    f"force-placed on {fp.staff_name} so nothing stays "
+                    f"unallocated: {fp.summary}."
+                ),
+            ))
+        print(
+            f"  Force-placed {len(_forced)} leftover flight(s); "
+            f"{sum(1 for fp in _forced if fp.notes)} needed a rule relaxed"
+        )
+        counts["FORCED"] = len(_forced)
+
     from .allocator.postsolve import relabel_pair_columns
-    rows = relabel_pair_columns(rows, flights, staff_today, pairs, d_day)
+    rows = relabel_pair_columns(
+        rows, flights, staff_today, pairs, d_day, relief=relief_plan,
+    )
 
     # W220 (2026-05-26 user direction): M-shift P2F handlers whose P2F
     # STD falls before 07:30 have their D-3hrs pre-brief window land
@@ -1623,6 +1762,9 @@ def run(
     )
 
     counts["WARNINGS"] = len(warnings)
+    # Post force-placement truth, not the pre-pass solver count.
+    counts["UNALLOCATED"] = len(unallocated_rows)
+    counts["ASSIGNED"] = len(result_assignments)
     return counts
 
 

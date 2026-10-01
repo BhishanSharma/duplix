@@ -14,6 +14,7 @@ import { get, post } from "../core/api.js";
 import * as store from "../core/store.js";
 import * as autocomplete from "../ui/autocomplete.js";
 import * as handlersPanel from "./handlers.js";
+import * as toast from "../ui/toast.js";
 
 let query = "";
 let saving = false;
@@ -129,7 +130,7 @@ async function apply(name, roleValue) {
     handlersPanel.render();
     await load();
   } catch (error) {
-    alert(`Could not nominate ${name}: ${error.message}`);
+    toast.error(`Could not nominate ${name}: ${error.message}`);
   } finally {
     saving = false;
   }

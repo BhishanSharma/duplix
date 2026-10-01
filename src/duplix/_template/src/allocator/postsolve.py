@@ -89,13 +89,12 @@ H6_PREPLAN_COUNTS: dict[OpsBoundary, int] = {
 #   M  -> relieved by A          (M->M1 is overlap, not relief)
 #   M1 -> relieved by A1
 #   A  -> relieved by N
-#   A1 -> relieved by N
+#   A1 -> nobody
 #   N  -> no tail-ext
 _RELIEF_NEXT_SHIFT: dict[str, str] = {
     "M": "A",
     "M1": "A1",
     "A": "N",
-    "A1": "N",
 }
 
 
@@ -285,9 +284,17 @@ def relabel_pair_columns(
     staff_today: list[StaffMember],
     pairs: list[Pair],
     ops_day: date_t,
+    relief=None,
 ) -> list[AllocationRow]:
     """Recompute ``planned_by_*`` and ``relieved_by_*`` for each row
     based on its CURRENT ``staff_employee_id``.
+
+    ``relief`` (a ``relievers.ReliefPlan``, 2026-10-01): when given, it
+    replaces the pair-based RELIEVED_BY. Every non-night person who has
+    a reliever in the plan gets that reliever on the flights handed over
+    at shift end (STD from 20 min before nominal end, plus the tail
+    window) — or, if they have none there, on their last flight. People
+    released early (no reliever) and N staff get no RELIEVED_BY.
 
     2026-05-26 fix. ``assemble_allocation_rows`` sets the pair-derived
     labels when the row is first built from the solver's assignments.
@@ -345,6 +352,31 @@ def relabel_pair_columns(
                 planner_by_position[(sid, cursor)] = p
                 cursor += 1
 
+    # Relief annotation targets: per staff, the row uids that carry
+    # RELIEVED_BY under the 1:1 relief plan.
+    relief_uids: set[str] = set()
+    if relief is not None:
+        from .relievers import relief_window_start
+        for sid, fl_rows in rows_by_staff.items():
+            s0 = staff_by_id.get(sid)
+            if s0 is None or s0.shift_today is None or sid not in relief.reliever_of:
+                continue
+            plain = [
+                r for r in fl_rows
+                if not r.is_international
+                and not (flight_by_uid.get(_row_uid(r)) is not None
+                         and flight_by_uid[_row_uid(r)].ops_class == _OC.P2F)
+            ]
+            if not plain:
+                continue
+            start = relief_window_start(s0.shift_today)
+            hand = [
+                r for r in plain
+                if std_to_ops_day_minutes(r.std, r.date, ops_day) >= start
+            ]
+            for r in (hand or [plain[-1]]):
+                relief_uids.add(_row_uid(r))
+
     out: list[AllocationRow] = []
     for r in rows:
         sid = r.staff_employee_id
@@ -385,7 +417,11 @@ def relabel_pair_columns(
 
         relieved_by_emp: str | None = None
         relieved_by_name: str | None = None
-        if s.shift_today and is_in_tail_ext(
+        if relief is not None:
+            if uid in relief_uids:
+                relieved_by_emp = relief.reliever_of.get(sid)
+                relieved_by_name = relief.reliever_name.get(sid)
+        elif s.shift_today and is_in_tail_ext(
             r.std, r.date, ops_day, s.shift_today,
         ):
             relief_shift = _RELIEF_NEXT_SHIFT.get(s.shift_today)

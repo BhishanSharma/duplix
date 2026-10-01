@@ -5,6 +5,11 @@
   padding: 3px 10px;
   border-radius: 11px;
   white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: min(320px, 34vw);
+  min-width: 0;
+  cursor: default;
 }
 .run-pill-busy { color: var(--primary); background: var(--plan-blue); }
 .run-pill-ok { color: var(--ok); background: var(--ok-bg); }

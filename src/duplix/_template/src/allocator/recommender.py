@@ -98,23 +98,27 @@ _W_SKIP_INTL_REMOVAL = 40
 
 # ---------- internals ----------
 
-def _h10_conflict_other_std(
+def _h10_conflicts(
     candidate_assignments: list[FlightInput],
     flight: FlightInput,
     ops_day: date_t,
-) -> FlightInput | None:
-    """Return the FIRST flight on a candidate staff's day-list whose
-    STD is within the H10 spacing floor of ``flight``'s STD (15 min,
-    30 for domestic→INTL and for two P2F flights).
-    None if no conflict.
+) -> list[FlightInput]:
+    """Every flight on a candidate staff's day-list whose STD is inside
+    the H10 spacing floor of ``flight`` (15 min; 30 for domestic->INTL
+    and for two P2F flights), earliest first.
+
+    ALL of them, not just the first: waiving only one leaves the next
+    neighbour still blocking, so the flight would stay unallocated no
+    matter how often the suggestion is applied.
     """
     key = spacing_key(flight, ops_day)
-    for other in candidate_assignments:
-        if other.unique_id == flight.unique_id:
-            continue
-        if not spacing_clear(key, [spacing_key(other, ops_day)]):
-            return other
-    return None
+    out = [
+        other for other in candidate_assignments
+        if other.unique_id != flight.unique_id
+        and not spacing_clear(key, [spacing_key(other, ops_day)])
+    ]
+    out.sort(key=lambda f: spacing_key(f, ops_day)[0])
+    return out
 
 
 def _is_p2f_buffer_blocked(
@@ -173,11 +177,15 @@ def _suggestions_for_flight(
         cap = hard_cap_for(s)
         current_count = _cap_relevant_count(eid)
         # H10: candidate already has a flight within spacing-floor.
-        conflict = _h10_conflict_other_std(
+        conflicts = _h10_conflicts(
             flights_per_staff.get(eid, []), flight, ops_day,
         )
-        if conflict is not None:
+        if conflicts:
+            conflict = conflicts[0]
             other_iso = conflict.std.isoformat(timespec="minutes")
+            all_iso = ",".join(
+                dict.fromkeys(c.std.isoformat(timespec="minutes") for c in conflicts)
+            )
             out.append(OverrideSuggestion(
                 intrusiveness=_W_WAIVE_H10,
                 override_type="waive_h10_pair",
@@ -194,6 +202,8 @@ def _suggestions_for_flight(
                     "std": flight_std_iso,
                     "employee": s.name,
                     "other_std": other_iso,
+                    # comma-separated; apply writes one waiver row each
+                    "other_stds": all_iso,
                 },
             ))
             continue

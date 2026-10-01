@@ -128,8 +128,13 @@ def apply_break_pass(
     d_day: date_t,
     break_len: int = BREAK_LEN_MIN,
     edge_margin: int = EDGE_MARGIN_MIN,
+    max_std_by_staff: dict[str, int] | None = None,
 ) -> tuple[list[AllocationRow], BreakSummary]:
+    """``max_std_by_staff``: staff released early (no reliever) mapped
+    to the latest ops-day minute they may hold a flight; a swap never
+    hands them a later one."""
     summary = BreakSummary()
+    _max_std = max_std_by_staff or {}
     flight_by_uid = {f.unique_id: f for f in flights}
     staff_by_id = {s.employee_id: s for s in staff_today}
 
@@ -264,6 +269,8 @@ def apply_break_pass(
                         continue
                     if _during_break(peer.employee_id, conflict_std):
                         continue
+                    if conflict_std > _max_std.get(peer.employee_id, 10**9):
+                        continue
                     if not _spacing_ok(peer.employee_id, spacing_key(f, d_day)):
                         continue
                     # Find a plain-domestic flight of peer's, outside s's
@@ -284,6 +291,8 @@ def apply_break_pass(
                         g_std = std_to_ops_day_minutes(g.std, g.date, d_day)
                         if win_start <= g_std < win_end:
                             continue  # would just create a new conflict
+                        if g_std > _max_std.get(s.employee_id, 10**9):
+                            continue  # s was released early
                         if s.employee_id not in matrix.get(g_uid, set()):
                             continue
                         if not _spacing_ok(

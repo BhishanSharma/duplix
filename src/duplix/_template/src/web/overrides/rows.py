@@ -67,21 +67,40 @@ def clear_all_overrides(state: AppState) -> int:
 def apply_phase_r_override(
     state: AppState, kind: str, payload: dict[str, str],
 ) -> int:
-    """Write a Phase-R recommender suggestion as an override row.
+    """Write a Phase-R recommender suggestion as override row(s).
 
     ``kind`` is one of waive_h10_pair / raise_cap / skip_p2f_buffer /
-    skip_intl_removal. Returns the new row's index. Raises ValueError on
-    an unknown kind and KeyError when a required field is missing.
+    skip_intl_removal. Returns the index of the last row written, or -1
+    when every row already existed (applying twice is a no-op, so
+    repeated "Apply all" clicks no longer pile up duplicates). A
+    waive_h10_pair payload may carry ``other_stds`` ("16:55,17:10") to
+    waive every blocking neighbour in one go. Raises ValueError on an
+    unknown kind and KeyError when a required field is missing.
     """
     if kind not in _PHASE_R_PAYLOAD_COLS:
         raise ValueError(f"unknown recommender kind: {kind!r}")
-    row: dict[str, str] = {"type": kind}
+    base: dict[str, str] = {"type": kind}
     for col in _PHASE_R_PAYLOAD_COLS[kind]:
+        if col == "other_std" and str(payload.get("other_stds", "")).strip():
+            continue   # filled per-row below
         value = str(payload.get(col, "")).strip()
         if not value:
             raise KeyError(f"missing payload field {col!r} for kind {kind!r}")
-        row[col] = value
-    return state.add_override(row)
+        base[col] = value
+    rows = [base]
+    if kind == "waive_h10_pair" and str(payload.get("other_stds", "")).strip():
+        stds = [t.strip() for t in str(payload["other_stds"]).split(",") if t.strip()]
+        rows = [{**base, "other_std": t} for t in stds]
+
+    last = -1
+    with state.lock:
+        existing = {tuple(sorted(r.items())) for r in state.overrides}
+        for row in rows:
+            if tuple(sorted(row.items())) in existing:
+                continue
+            last = state.add_override(row)
+            existing.add(tuple(sorted(row.items())))
+    return last
 
 
 def write_staged_override(

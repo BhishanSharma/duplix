@@ -16,6 +16,7 @@
 import { $, escapeHTML } from "../core/dom.js";
 import { del, upload } from "../core/api.js";
 import * as store from "../core/store.js";
+import * as toast from "../ui/toast.js";
 
 /** @type {{selector: string, kinds: string[], onRender?: function}[]} */
 const mounts = [];
@@ -164,7 +165,7 @@ export async function uploadFile(kind, file) {
     await load();
     setStatus(`Loaded ${file.name}`, "ok");
   } catch (e) {
-    alert(`Upload failed: ${e.message}`);
+    toast.error(`Upload failed: ${e.message}`);
     if (slot) slot.classList.remove("uploading");
   }
 }
@@ -173,7 +174,7 @@ async function clearOne(kind) {
   try {
     await del(`/api/inputs/${kind}`);
   } catch (e) {
-    alert(`Remove failed: ${e.message}`);
+    toast.error(`Remove failed: ${e.message}`);
     return;
   }
   await load();
@@ -183,7 +184,7 @@ async function removeRoster(kind, fileId) {
   try {
     await del(`/api/inputs/${kind}/${encodeURIComponent(fileId)}`);
   } catch (e) {
-    alert(`Remove failed: ${e.message}`);
+    toast.error(`Remove failed: ${e.message}`);
     return;
   }
   await load();

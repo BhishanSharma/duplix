@@ -25,6 +25,7 @@
 @import url("/static/css/components/forms.css");
 @import url("/static/css/components/drawer.css");
 @import url("/static/css/components/modal.css");
+@import url("/static/css/components/toast.css");
 
 @import url("/static/css/features/dashboard.css");
 @import url("/static/css/features/chart-workload-dist.css");

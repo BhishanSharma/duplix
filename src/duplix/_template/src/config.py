@@ -124,6 +124,14 @@ class BreakPassConfig(_Frozen):
     )
 
 
+class ReliefPassConfig(_Frozen):
+    """Relievers + early release (``allocator/relievers.py``). Everyone
+    but N and A1 gets one reliever (a reliever relieves one person). Staff
+    left without one are released ``free_early_minutes`` before shift end."""
+
+    free_early_minutes: int = Field(default=60, ge=15, le=180)
+
+
 class Config(_Frozen):
     allocation: AllocationConfig
     # Task 2a (2026-05-12): required_staffing removed. The per-shift
@@ -161,6 +169,7 @@ class Config(_Frozen):
     extraction_filters: list[dict[str, str]] = []
     p2f_adjustment: P2FAdjustmentConfig = P2FAdjustmentConfig()
     break_pass: BreakPassConfig = BreakPassConfig()
+    relief_pass: ReliefPassConfig = ReliefPassConfig()
 
 
 def load_config(path: Path | str) -> Config:

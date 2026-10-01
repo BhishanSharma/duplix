@@ -85,7 +85,9 @@ def cancel() -> bool:
         return True
 
 
-def trigger(state: AppState, d_day: date_t, sub_command: str) -> bool:
+def trigger(
+    state: AppState, d_day: date_t, sub_command: str, *, pin_prior: bool = False,
+) -> bool:
     """Start a run on a background thread. Returns False when one is
     already in flight."""
     with _lock:
@@ -100,18 +102,20 @@ def trigger(state: AppState, d_day: date_t, sub_command: str) -> bool:
         _run.cancelled = False
 
     thread = threading.Thread(
-        target=_worker, args=(state, d_day, sub_command),
+        target=_worker, args=(state, d_day, sub_command, pin_prior),
         name=f"flight-alloc-{sub_command}", daemon=True,
     )
     thread.start()
     return True
 
 
-def _worker(state: AppState, d_day: date_t, sub_command: str) -> None:
+def _worker(
+    state: AppState, d_day: date_t, sub_command: str, pin_prior: bool = False,
+) -> None:
     counts: dict[str, int] = {}
     error = ""
     try:
-        counts = _dispatch(state, d_day, sub_command)
+        counts = _dispatch(state, d_day, sub_command, pin_prior)
     except FileNotFoundError as exc:
         # A missing upload is an operator problem, not a crash — say so
         # plainly rather than dumping a traceback into the UI.
@@ -135,7 +139,9 @@ def _worker(state: AppState, d_day: date_t, sub_command: str) -> None:
         print(f"[run] {sub_command} finished but was cancelled — results dropped")
 
 
-def _dispatch(state: AppState, d_day: date_t, sub_command: str) -> dict[str, int]:
+def _dispatch(
+    state: AppState, d_day: date_t, sub_command: str, pin_prior: bool = False,
+) -> dict[str, int]:
     """Run one stage and return its counts."""
     from ..plan import run as run_plan
     from ..step1_clean_flights import run as run_step1
@@ -154,7 +160,9 @@ def _dispatch(state: AppState, d_day: date_t, sub_command: str) -> dict[str, int
         return run_step2(state, d_day, CONFIG_PATH)
 
     if sub_command in ("step3", "allocate"):
-        return run_allocate(state, d_day, CONFIG_PATH, mode_label="Allocate")
+        return run_allocate(
+            state, d_day, CONFIG_PATH, mode_label="Allocate", pin_prior=pin_prior,
+        )
 
     if sub_command == "all":
         # Plan first so cleaned flights + availability are rebuilt from
@@ -162,7 +170,7 @@ def _dispatch(state: AppState, d_day: date_t, sub_command: str) -> dict[str, int
         run_plan(state, d_day, CONFIG_PATH)
         return run_allocate(
             state, d_day, CONFIG_PATH,
-            append_warnings=True, mode_label="Allocate",
+            append_warnings=True, mode_label="Allocate", pin_prior=pin_prior,
         )
 
     raise ValueError(f"unknown run step: {sub_command!r}")

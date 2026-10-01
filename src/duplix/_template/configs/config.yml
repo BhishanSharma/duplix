@@ -231,6 +231,14 @@ p2f_adjustment:
 break_pass:
   length_minutes: 30
 
+# ---------- Relievers + early release (2026-10-01) ----------
+# Everyone except N and A1 gets ONE reliever from the next shift (M->A,
+# M1->A1, A->N); a reliever relieves at most one person. Staff
+# left without a reliever are released this many minutes before shift
+# end (no flights in that window). Who is released rotates day to day.
+relief_pass:
+  free_early_minutes: 60
+
 # ---------- GULF routing (2026-05-19) ----------
 # A flight is GULF when its DEP airport is in the list below OR its
 # Aircraft Owner / TYPE letter equals one of the listed carrier codes
