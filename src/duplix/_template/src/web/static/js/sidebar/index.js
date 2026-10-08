@@ -9,13 +9,14 @@
  *
  * Slides in from the right, closes on Escape or an outside click. Also
  * owns the international airport code list (view / add / remove), the
- * shift break length and the per-staff flight caps — once-in-a-while
+ * shift timings, the shift break length and the per-staff flight caps — once-in-a-while
  * config edits, not per-run overrides, so they live here too.
  */
 
 import { $, escapeHTML } from "../core/dom.js";
 import { getOr, post } from "../core/api.js";
 import { confirmModal } from "../ui/confirm.js";
+import { setShiftWindows } from "../core/constants.js";
 import * as slots from "../panels/input-slots.js";
 import * as dateControl from "../panels/date-control.js";
 
@@ -34,11 +35,15 @@ export const template = `
               aria-label="Close">&times;</button>
     </header>
     <div class="drawer-body">
-      <section class="setup-section">
-        <div class="setup-section-head">
+      <details class="setup-acc" id="setup-roster-files" open>
+        <summary>
+          <svg class="acc-chevron" aria-hidden="true" viewBox="0 0 24 24" fill="none"
+               stroke="currentColor" stroke-width="2" stroke-linecap="round"
+               stroke-linejoin="round"><path d="m9 6 6 6-6 6"></path></svg>
           <h3>Roster files</h3>
           <span id="setup-status" class="inputs-status warn">—</span>
-        </div>
+        </summary>
+        <div class="acc-body setup-section">
         <p class="subdued small">
           Upload each roster when it is published (about once a month).
           They are saved and remembered between runs, and the roster that
@@ -52,13 +57,18 @@ export const template = `
           is written back to your files. After adding a roster, re-run
           Plan so the allocation picks it up.
         </p>
-      </section>
+        </div>
+      </details>
 
-      <section class="drawer-section" id="setup-intl-airport">
-        <div class="drawer-section-head">
+      <details class="setup-acc drawer-section" id="setup-intl-airport">
+        <summary>
+          <svg class="acc-chevron" aria-hidden="true" viewBox="0 0 24 24" fill="none"
+               stroke="currentColor" stroke-width="2" stroke-linecap="round"
+               stroke-linejoin="round"><path d="m9 6 6 6-6 6"></path></svg>
           <h3>International airport codes</h3>
           <span class="subdued" id="intl-airport-count"></span>
-        </div>
+        </summary>
+        <div class="acc-body">
         <p class="subdued">
           Flights departing from these airports are treated as
           international. Saved to <code>international_airport_codes</code>
@@ -80,13 +90,42 @@ export const template = `
           <button id="intl-airport-save" class="primary" type="submit">Add</button>
           <span class="form-status" id="intl-airport-status"></span>
         </form>
-      </section>
+        </div>
+      </details>
 
-      <section class="drawer-section" id="setup-break-length">
-        <div class="drawer-section-head">
+      <details class="setup-acc drawer-section" id="setup-shift-times">
+        <summary>
+          <svg class="acc-chevron" aria-hidden="true" viewBox="0 0 24 24" fill="none"
+               stroke="currentColor" stroke-width="2" stroke-linecap="round"
+               stroke-linejoin="round"><path d="m9 6 6 6-6 6"></path></svg>
+          <h3>Shift timings</h3>
+          <span class="subdued" id="shift-times-current"></span>
+        </summary>
+        <div class="acc-body">
+        <p class="subdued">
+          When each shift starts and ends, on the 24-hour clock (N ends the
+          next morning). The flight windows, handover and ZC report buffers
+          move with them. Saved to <code>configs/shift_times.json</code>;
+          re-run Plan and Allocate to use the new hours.
+        </p>
+        <form id="shift-times-form" autocomplete="off" novalidate>
+          <div class="shift-times-grid" id="shift-times-grid"></div>
+          <button id="shift-times-save" class="primary" type="submit">Save</button>
+          <button id="shift-times-reset" class="ghost" type="button">Reset to defaults</button>
+          <span class="form-status" id="shift-times-status"></span>
+        </form>
+        </div>
+      </details>
+
+      <details class="setup-acc drawer-section" id="setup-break-length">
+        <summary>
+          <svg class="acc-chevron" aria-hidden="true" viewBox="0 0 24 24" fill="none"
+               stroke="currentColor" stroke-width="2" stroke-linecap="round"
+               stroke-linejoin="round"><path d="m9 6 6 6-6 6"></path></svg>
           <h3>Shift break length</h3>
           <span class="subdued" id="break-length-current"></span>
-        </div>
+        </summary>
+        <div class="acc-body">
         <p class="subdued">
           Every on-shift staff member gets one flight-free break of this
           length, kept out of the first and last hour of their shift.
@@ -103,12 +142,17 @@ export const template = `
           <button id="break-length-save" class="primary" type="submit">Save</button>
           <span class="form-status" id="break-length-status"></span>
         </form>
-      </section>
-
-      <section class="drawer-section" id="setup-hard-caps">
-        <div class="drawer-section-head">
-          <h3>Max flights per staff</h3>
         </div>
+      </details>
+
+      <details class="setup-acc drawer-section" id="setup-hard-caps">
+        <summary>
+          <svg class="acc-chevron" aria-hidden="true" viewBox="0 0 24 24" fill="none"
+               stroke="currentColor" stroke-width="2" stroke-linecap="round"
+               stroke-linejoin="round"><path d="m9 6 6 6-6 6"></path></svg>
+          <h3>Max flights per staff</h3>
+        </summary>
+        <div class="acc-body">
         <p class="subdued">
           The most flights one person can be given in a shift — the
           allocator never goes over it. A cap below the preferred or
@@ -122,7 +166,8 @@ export const template = `
           <button id="hard-caps-save" class="primary" type="submit">Save</button>
           <span class="form-status" id="hard-caps-status"></span>
         </form>
-      </section>
+        </div>
+      </details>
     </div>
   </aside>`;
 
@@ -138,8 +183,36 @@ export function close() {
 export async function open() {
   $("#setup-sidebar").hidden = false;
   await Promise.all([
-    slots.load(), loadAirports(), loadBreakLength(), loadHardCaps(),
+    slots.load(), loadAirports(), loadShiftTimes(), loadBreakLength(),
+    loadHardCaps(),
   ]);
+}
+
+/* ---- collapsible sections -------------------------------------------
+ * Each section is a <details> row (chevron + title + a value on the
+ * right). Native <details> gives keyboard + screen-reader support for
+ * free; the open/closed state is remembered per section in this
+ * browser, so the sidebar opens the way the operator left it. */
+const ACC_KEY = "setup-sidebar:open:";
+
+/** Open a section regardless of its remembered state — used when it
+ *  holds something that needs attention (a missing roster). */
+function openSection(selector) {
+  const el = $(selector);
+  if (el) el.open = true;
+}
+
+function initAccordions() {
+  for (const el of document.querySelectorAll("#setup-sidebar details.setup-acc")) {
+    try {
+      const saved = localStorage.getItem(ACC_KEY + el.id);
+      if (saved !== null) el.open = saved === "1";
+    } catch { /* storage blocked: fall back to the markup default */ }
+    el.addEventListener("toggle", () => {
+      try { localStorage.setItem(ACC_KEY + el.id, el.open ? "1" : "0"); }
+      catch { /* not remembered; harmless */ }
+    });
+  }
 }
 
 /** Say so when the allocation date (or the day after it) has no roster
@@ -154,6 +227,7 @@ async function renderCoverage() {
   );
   const notices = (cov && cov.notices) || [];
   box.hidden = notices.length === 0;
+  if (notices.length) openSection("#setup-roster-files");
   box.innerHTML = notices.map((n) => `<p>${n.replace(/</g, "&lt;")}</p>`).join("");
 }
 
@@ -162,6 +236,7 @@ function renderStatus() {
   renderCoverage();
   const missing = slots.groupMissingCount("setup");
   const banner = $("#setup-status");
+  if (missing > 0) openSection("#setup-roster-files");
   if (banner) {
     banner.textContent = missing === 0
       ? "Both rosters saved ✓"
@@ -228,6 +303,159 @@ async function removeAirport(btn) {
     btn.disabled = false;
     setAirportStatus(e.message || "Remove failed.", false);
   }
+}
+
+/* ---- shift timings -------------------------------------------------- */
+
+const setShiftTimesStatus = (message, ok) =>
+  setStatus("#shift-times-status", message, ok);
+
+/** The last payload from the server: `{shifts, defaults, customised}`. */
+let shiftTimes = null;
+
+/** "430", "4:30" and "0430" all read as 04:30; anything else is left for
+ *  the server to reject with a proper message. */
+function normaliseClock(raw) {
+  const m = /^(\d{1,2}):?(\d{2})$/.exec(raw.trim());
+  return m ? `${m[1].padStart(2, "0")}:${m[2]}` : raw.trim();
+}
+
+function clockToMinutes(text) {
+  const m = /^([01]\d|2[0-3]):([0-5]\d)$/.exec(text);
+  return m ? Number(m[1]) * 60 + Number(m[2]) : null;
+}
+
+/** "8 h 30 min" for a row's start/end, or "—" while either is unfinished.
+ *  Only N may end after midnight. */
+function shiftLength(shift, start, end) {
+  const a = clockToMinutes(start);
+  let b = clockToMinutes(end);
+  if (a === null || b === null) return "—";
+  if (b <= a) {
+    if (shift !== "N") return "—";
+    b += 1440;
+  }
+  const h = Math.floor((b - a) / 60);
+  const m = (b - a) % 60;
+  return m ? `${h} h ${m} min` : `${h} h`;
+}
+
+function updateShiftLength(row) {
+  const [start, end] = row.querySelectorAll("input");
+  row.querySelector(".shift-length").textContent = shiftLength(
+    row.dataset.shift, start.value.trim(), end.value.trim(),
+  );
+}
+
+function renderShiftTimes(payload) {
+  shiftTimes = payload;
+  const rows = Object.entries(payload.shifts).map(([shift, { start, end }]) => {
+    const s = escapeHTML(shift);
+    const field = (edge, value) => `
+      <td><input type="text" inputmode="numeric" maxlength="5"
+                 placeholder="HH:MM" value="${escapeHTML(value)}"
+                 data-shift="${s}" data-edge="${edge}"
+                 aria-label="${s} ${edge}${shift === "N" && edge === "end" ? " (next day)" : ""}"></td>`;
+    return `
+      <tr data-shift="${s}">
+        <th scope="row">${s}</th>${field("start", start)}${field("end", end)}
+        <td class="shift-length subdued">${shiftLength(shift, start, end)}</td>
+      </tr>`;
+  }).join("");
+  $("#shift-times-grid").innerHTML = `
+    <table class="shift-times-table">
+      <thead><tr>
+        <th scope="col">Shift</th><th scope="col">Start</th>
+        <th scope="col">End</th><th scope="col">Length</th>
+      </tr></thead>
+      <tbody>${rows}</tbody>
+    </table>`;
+  $("#shift-times-current").textContent =
+    payload.customised ? "Customised" : "Default";
+  $("#shift-times-reset").disabled = !payload.customised;
+  // The trend chart paints its shift bands from these.
+  if (payload.windows_min) setShiftWindows(payload.windows_min);
+}
+
+async function loadShiftTimes() {
+  const payload = await getOr("/api/shift_times", null, "shiftTimes");
+  if (payload) renderShiftTimes(payload);
+}
+
+/** Boot-time sync: charts need the server's hours before their first
+ *  paint, whether or not the sidebar is ever opened. Never throws. */
+export async function syncShiftWindows() {
+  const payload = await getOr("/api/shift_times", null, "shiftTimes");
+  if (payload?.windows_min) setShiftWindows(payload.windows_min);
+}
+
+function initShiftTimesForm() {
+  const form = $("#shift-times-form");
+  if (!form) return;
+
+  // Delegated, so a re-render keeps working.
+  const grid = $("#shift-times-grid");
+  grid.addEventListener("input", (ev) => {
+    const input = ev.target.closest("input[data-shift]");
+    if (!input) return;
+    const cleaned = input.value.replace(/[^0-9:]/g, "");
+    if (cleaned !== input.value) input.value = cleaned;
+    updateShiftLength(input.closest("tr"));
+  });
+  grid.addEventListener("change", (ev) => {
+    const input = ev.target.closest("input[data-shift]");
+    if (!input) return;
+    input.value = normaliseClock(input.value);
+    updateShiftLength(input.closest("tr"));
+  });
+
+  form.addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const shifts = {};
+    for (const input of form.querySelectorAll("input[data-shift]")) {
+      const { shift, edge } = input.dataset;
+      (shifts[shift] ||= {})[edge] = normaliseClock(input.value);
+    }
+    const unchanged = Object.entries(shifts).every(([shift, { start, end }]) =>
+      shiftTimes?.shifts[shift]?.start === start
+      && shiftTimes?.shifts[shift]?.end === end);
+    if (unchanged) {
+      setShiftTimesStatus("Nothing changed.", true);
+      return;
+    }
+    const btn = $("#shift-times-save");
+    btn.disabled = true;
+    setShiftTimesStatus("Saving…", true);
+    try {
+      renderShiftTimes(await post("/api/shift_times", { shifts }));
+      setShiftTimesStatus(
+        "Saved. Re-run Plan, then Allocate, to use the new hours.", true,
+      );
+    } catch (e) {
+      setShiftTimesStatus(e.message || "Save failed.", false);
+    } finally {
+      btn.disabled = false;
+    }
+  });
+
+  $("#shift-times-reset").addEventListener("click", async () => {
+    const ok = await confirmModal(
+      "Reset shift timings?",
+      "Every shift goes back to its shipped start and end. The change is "
+        + "used from the next Plan / Allocate run.",
+      "Reset",
+    );
+    if (!ok) return;
+    setShiftTimesStatus("Resetting…", true);
+    try {
+      renderShiftTimes(await post("/api/shift_times/reset", {}));
+      setShiftTimesStatus(
+        "Back to the shipped hours. Re-run Plan, then Allocate.", true,
+      );
+    } catch (e) {
+      setShiftTimesStatus(e.message || "Reset failed.", false);
+    }
+  });
 }
 
 const setAirportStatus = (message, ok) =>
@@ -424,7 +652,9 @@ export function init() {
   slots.registerMount("#setup-inputs-list", KINDS, renderStatus);
   slots.bindMount("#setup-inputs-list");
   $("#close-setup").addEventListener("click", close);
+  initAccordions();
   initIntlAirportForm();
+  initShiftTimesForm();
   initBreakLengthForm();
   initHardCapsForm();
 }

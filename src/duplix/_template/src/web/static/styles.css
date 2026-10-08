@@ -18,7 +18,6 @@
 @import url("/static/css/layout.css");
 
 @import url("/static/css/components/run-status.css");
-@import url("/static/css/components/run-pill.css");
 @import url("/static/css/components/cards.css");
 @import url("/static/css/components/filters.css");
 @import url("/static/css/components/tables.css");
@@ -41,3 +40,6 @@
 @import url("/static/css/features/coverage.css");
 @import url("/static/css/features/inputs.css");
 @import url("/static/css/features/setup-sidebar.css");
+
+/* Theme layer: loaded last so it restyles everything above. */
+@import url("/static/css/theme.css");

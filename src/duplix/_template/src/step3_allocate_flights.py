@@ -48,6 +48,7 @@ from .allocator.postsolve import (
 from .allocator.windows import std_to_ops_day_minutes
 from .config import Config, load_config
 from .io.readers import (
+    read_p2f_exclusions,
     read_p2f_nominations,
     read_per_staff_overrides,
     read_raise_cap_overrides,
@@ -162,7 +163,7 @@ def _read_auto_p2f_handlers_from_rosters(
     am_roster_rows: list[AMRosterRow],
     availability: list[AvailabilityRow],
     d_day: date_t,
-) -> dict[ShiftCode, str]:
+) -> dict[ShiftCode, list[str]]:
     """Walk BOTH rosters for cells whose status is P2F/M, P2F/A, or
     P2F/N on D. Returns {shift: employee_id}. First match per shift wins;
     STAFF roster is scanned before AM roster so STAFF nominations take
@@ -175,7 +176,7 @@ def _read_auto_p2f_handlers_from_rosters(
     function only scanned IN_AM_Roster, which is why STAFF roster
     nominations were silently ignored.
     """
-    auto: dict[ShiftCode, str] = {}
+    auto: dict[ShiftCode, list[str]] = {}
     # 2026-05-26 (followup): walk availability for BOTH STAFF and ZC.
     # A regular staff in IN_Staff_Roster with `N/P2F/ZC` cell becomes
     # role=ZC + license=P2F via Step 2; if we restrict to STAFF here he
@@ -190,8 +191,8 @@ def _read_auto_p2f_handlers_from_rosters(
             _P2F_HANDLER_STATUS_TO_SHIFT.get(av.status)
             or _ZC_P2F_HANDLER_STATUS_TO_SHIFT.get(av.status)
         )
-        if shift and shift not in auto:
-            auto[shift] = av.employee_id
+        if shift and av.employee_id not in auto.setdefault(shift, []):
+            auto[shift].append(av.employee_id)
     for am in am_roster_rows:
         cell_status = am.status_by_date.get(d_day)
         if cell_status is None:
@@ -203,9 +204,9 @@ def _read_auto_p2f_handlers_from_rosters(
             _P2F_HANDLER_STATUS_TO_SHIFT.get(cell_status)
             or _ZC_P2F_HANDLER_STATUS_TO_SHIFT.get(cell_status)
         )
-        if shift and shift not in auto:
-            auto[shift] = am.employee_id
-    return auto
+        if shift and am.employee_id not in auto.setdefault(shift, []):
+            auto[shift].append(am.employee_id)
+    return {k: v for k, v in auto.items() if v}
 
 
 def _build_staff_today(
@@ -344,7 +345,7 @@ def _to_flight_inputs(
 
 def _build_p2f_handler_anchors(
     flights: list[FlightInput],
-    p2f_handler_by_shift: dict[ShiftCode, str],
+    handlers_by_shift: dict[ShiftCode, list[str]],
     ops_day: date_t,
 ) -> dict[str, list[int]]:
     """Compute the list of P2F flight STDs (in ops-day minutes) per
@@ -362,8 +363,10 @@ def _build_p2f_handler_anchors(
         std_min = std_to_ops_day_minutes(f.std, f.date, ops_day)
         for shift, (start, end) in SHIFT_NOMINAL_MIN.items():
             if start <= std_min <= end:
-                handler = p2f_handler_by_shift.get(shift)
-                if handler:
+                # Which of the shift's handlers gets this flight is the
+                # solver's call, so every handler of the shift keeps the
+                # no-normal-flight window around it (safe, if cautious).
+                for handler in handlers_by_shift.get(shift, ()):
                     out[handler].append(std_min)
                 break
     return dict(out)
@@ -431,6 +434,7 @@ def run(
 
     # Step-4-specific overrides (date is implicit from d_day).
     p2f_nominations = read_p2f_nominations(overrides, d_day, name_to_id)
+    p2f_excluded_ids = read_p2f_exclusions(overrides, name_to_id)
     per_staff = read_per_staff_overrides(overrides, d_day, name_to_id)
     # Per-day "sick" pulls a staff out of today's allocation. Applied
     # below once staff_today is built — we zero their shift_today so
@@ -640,7 +644,16 @@ def run(
     #      assigner explicitly nominates a different person.
     staff_by_id = {s.employee_id: s for s in staff_today}
     auto_p2f = _read_auto_p2f_handlers_from_rosters(am_rows, availability, d_day)
-    p2f_handler_by_shift: dict[ShiftCode, str] = dict(auto_p2f)
+    # Every handler per shift, primary first. Roster cells and manual
+    # nominations ADD to each other (a shift with >8 P2F flights needs
+    # several); take someone off with "Not doing P2F today".
+    handlers_by_shift: dict[ShiftCode, list[str]] = {}
+    for _sh, _ids in auto_p2f.items():
+        _keep = [e for e in _ids if e not in p2f_excluded_ids]
+        if _keep:
+            handlers_by_shift[_sh] = _keep
+    if p2f_excluded_ids:
+        print(f"  excluded from P2F today: {sorted(p2f_excluded_ids)}")
     if auto_p2f:
         print(
             f"  auto-picked P2F handlers from roster cells: "
@@ -672,23 +685,12 @@ def run(
                 p2f_count_by_shift[shift] += 1
                 break
 
-    # W215: shifts with > 8 P2F flights need an additional nominee.
     P2F_HANDLER_CAP = 8  # noqa: N806
-    for shift, count in sorted(p2f_count_by_shift.items()):
-        if count > P2F_HANDLER_CAP:
-            extra_needed = -(-count // P2F_HANDLER_CAP) - 1  # ceil-1
-            warnings.append(WarningRow(
-                severity=Severity.WARN, code="W215", date=d_day,
-                message=(
-                    f"Shift {shift} has {count} P2F flights; one handler "
-                    f"can do max {P2F_HANDLER_CAP}. Nominate "
-                    f"{extra_needed} additional P2F handler(s) for {shift} "
-                    f"in the Override drawer (type=p2f, shift={shift}, employee=<name>)."
-                ),
-            ))
     for nom in p2f_nominations:
         if nom.date != d_day:
             continue
+        if nom.employee_id in p2f_excluded_ids:
+            continue  # operator took this person off P2F for today
         s = staff_by_id.get(nom.employee_id)
         if s is None:
             warnings.append(WarningRow(
@@ -745,7 +747,56 @@ def run(
                     "Update the roster's license cell to silence this warning."
                 ),
             ))
-        p2f_handler_by_shift[nom.shift] = nom.employee_id
+        if nom.employee_id not in handlers_by_shift.setdefault(nom.shift, []):
+            handlers_by_shift[nom.shift].append(nom.employee_id)
+
+    # Top each shift up to the handlers it needs (one per 8 P2F flights),
+    # from the roster's P2F licence column — only with someone confirmed
+    # valid (STAFF, on that shift today, licence really says P2F). Roster
+    # cells and manual nominations above are kept; only the shortfall is
+    # filled. Anything still short is a gap the operator must fill.
+    from .allocator.p2f_autofill import (
+        Candidate,
+        autofill_handlers,
+        handlers_needed,
+    )
+    _needed = {
+        sh: handlers_needed(p2f_count_by_shift.get(sh, 0))
+        for sh in sorted(p2f_shifts_needing_handler)
+    }
+    _picked = autofill_handlers(
+        (Candidate(_s.employee_id, _s.name, _s.role.value,
+                   _s.shift_today, _s.license) for _s in staff_today),
+        _needed, handlers_by_shift, p2f_excluded_ids,
+    )
+    for _shift, _cands in _picked.items():
+        for _c in _cands:
+            handlers_by_shift.setdefault(_shift, []).append(_c.employee_id)
+            print(f"  auto-filled P2F handler for {_shift} from licence: {_c.name}")
+
+    # W215: a shift with more P2F flights than its handlers can take.
+    for _shift, _need in sorted(_needed.items()):
+        _have = len(handlers_by_shift.get(_shift, []))
+        if _have and _have < _need:
+            warnings.append(WarningRow(
+                severity=Severity.WARN, code="W215", date=d_day,
+                message=(
+                    f"Shift {_shift} has {p2f_count_by_shift[_shift]} P2F "
+                    f"flights; one handler can do max {P2F_HANDLER_CAP}, so "
+                    f"{_need} handlers are needed but only {_have} found. "
+                    f"Nominate {_need - _have} more P2F-licensed staff on "
+                    f"{_shift} in Handler Assign."
+                ),
+            ))
+
+    # Primary handler per shift (hosts pre-planning); the rest are extras.
+    p2f_handler_by_shift: dict[ShiftCode, str] = {
+        sh: ids[0] for sh, ids in handlers_by_shift.items() if ids
+    }
+    p2f_extra_handlers_by_shift: dict[ShiftCode, tuple[str, ...]] = {
+        sh: tuple(ids[1:]) for sh, ids in handlers_by_shift.items()
+        if len(ids) > 1
+    }
 
     # Warn loudly for any shift that has P2F flights but no valid nomination.
     for shift in sorted(p2f_shifts_needing_handler):
@@ -760,7 +811,7 @@ def run(
                 ),
             ))
 
-    p2f_anchors = _build_p2f_handler_anchors(flights, p2f_handler_by_shift, d_day)
+    p2f_anchors = _build_p2f_handler_anchors(flights, handlers_by_shift, d_day)
 
     # ---- Phase R per-flight override sets ----
     # Build a (flt, std_iso) → unique_id resolver so override rows
@@ -835,8 +886,10 @@ def run(
     elig_ctx = EligibilityContext(
         ops_day=d_day,
         p2f_handler_by_shift=p2f_handler_by_shift,
+        extra_p2f_handlers_by_shift=p2f_extra_handlers_by_shift,
         p2f_flight_minutes_by_handler=p2f_anchors,
         skip_p2f_buffer_pairs=frozenset(skip_p2f_buffer_pairs),
+        zc_end_cutoff_min=config.zc_cutoff.minutes_before_shift_end,
     )
 
     # --- Eligibility matrix + zero-eligibility check (W201) ----------
@@ -960,7 +1013,7 @@ def run(
             if s_start <= f_std_min <= s_end:
                 flights_per_shift_min[shift_code_iter] += 1
                 break
-    handler_set = set(p2f_handler_by_shift.values())
+    handler_set = {e for ids in handlers_by_shift.values() for e in ids}
     bucket_sizes: dict[tuple[ShiftCode, Role], int] = defaultdict(int)
     staff_per_shift: dict[ShiftCode, int] = defaultdict(int)
     for s in staff_today:
@@ -1267,6 +1320,7 @@ def run(
             rows, flights, staff_today, matrix,
             p2f_handlers=elig_ctx.p2f_handler_by_shift,
             d_day=d_day,
+            extra_handler_ids=elig_ctx.all_p2f_handler_ids,
         )
     if rebalance_summary.n_transfers:
         print(
@@ -1551,7 +1605,7 @@ def run(
     # avoids picking the same person every night.
     if preplan_only_flights:
         from .schemas import AllocationRow, AllocationSheet
-        handler_set = set(elig_ctx.p2f_handler_by_shift.values())
+        handler_set = elig_ctx.all_p2f_handler_ids
         n_pool = [
             s for s in staff_today
             if s.shift_today == "N"
@@ -1750,6 +1804,7 @@ def run(
     with state.lock:
         state.run_date = d_day
         state.allocations = list(bundle.rows)
+        state.allocation_stale = False
         state.pairs = list(bundle.pairs)
         state.workload = list(bundle.summary)
         state.unallocated = unallocated_rows

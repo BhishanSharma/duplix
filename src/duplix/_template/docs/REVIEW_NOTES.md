@@ -78,3 +78,27 @@ Line numbers are approximate. Suggested stage functions, in order:
 
 Do the split behind characterization tests (real past day: inputs plus the
 accepted output, compared via `allocator/invariants.py` and row diffs).
+
+## A1 backup relievers (2026-10-04)
+A people left without an N reliever are now relieved by A1 staff of the same
+role instead of being released early (`allocator/relievers.py`,
+`BACKUP_RELIEF_SHIFT = {"A": "A1"}`).
+* An A1 person covers at most ONE A person. One who already relieves an M1
+  colleague may take an A person as well (14:30 vs 21:00 handovers).
+* "Most feasible" A1: not already relieving anyone, then fewest of their own
+  flights in the A handover window (20:40-21:30), then lightest workload.
+* Early release now only applies once N and A1 are both used up.
+* Workload note reads `Reliever: <name> (A1 backup)`; the RELIEVED_BY column
+  uses the A1 person like any other reliever.
+* Tests: `tests/test_relievers.py` (4 new cases).
+
+## Setup sidebar: collapsible sections (2026-10-04)
+The four Setup sections (Roster files, International airport codes, Shift
+break length, Max flights per staff) are now `<details class="setup-acc">`
+rows — chevron + title on the left, current value on the right.
+* Only Roster files is open by default; the others start collapsed.
+* Each section's open/closed state is remembered per browser (localStorage).
+* Roster files is forced open while a roster is missing or the coverage
+  banner has a notice, so a problem is never hidden behind a closed row.
+* Files: `js/sidebar/index.js` (template + `initAccordions`),
+  `css/features/setup-sidebar.css`. All element ids are unchanged.

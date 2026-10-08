@@ -152,7 +152,12 @@ export function render() {
     lines.push(rowHtml(r, shiftByStaff));
   }
 
-  $("#alloc-table tbody").innerHTML = lines.join("");
+  $("#alloc-table tbody").innerHTML = lines.length
+    ? lines.join("")
+    : `<tr><td colspan="10" class="subdued">${
+        store.allocations.data.length
+          ? "No rows match the current filters."
+          : "No allocations yet — run Plan, then Allocate."}</td></tr>`;
   const total = store.allocations.data.length;
   $("#alloc-count").textContent = count > MAX_RENDERED_ROWS
     ? `${count.toLocaleString()} matching rows (showing first ${MAX_RENDERED_ROWS} of ${total.toLocaleString()})`

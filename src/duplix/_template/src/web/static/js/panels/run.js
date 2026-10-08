@@ -1,4 +1,4 @@
-/* Plan / Allocate / Reset, and the status pill that tracks them.
+/* Plan / Allocate / Reset, announced through toast notifications.
  *
  * A run happens on a server worker thread; the POST returns as soon as
  * it's accepted and this polls /api/run/status until it settles. When
@@ -23,16 +23,22 @@ let pollTimer = null;
 let runStart = null;
 let mode = "allocate";        // or "plan"
 
-export function setRunStatus(text, kind /* "busy" | "ok" | "err" | "" */) {
-  const el = $("#run-status-pill");
-  if (!el) return;
-  el.textContent = text || "";
-  // Long server error messages get ellipsized by CSS (run-pill.css) so
-  // they can't blow out the navbar — this keeps the full text a hover
-  // away instead of just dropping it.
-  el.title = text || "";
-  el.hidden = !text;
-  el.className = "run-pill" + (kind ? ` run-pill-${kind}` : "");
+/** Every run / upload status goes out as a toast — there is no status
+ *  text in the header. "busy" is a single updating toast; anything else
+ *  settles it and shows a normal one. */
+export function setRunStatus(text, kind /* "busy" | "ok" | "err" | "warn" | "" */) {
+  if (!text) {
+    toast.clearBusy();
+    return;
+  }
+  if (kind === "busy") {
+    toast.busy(text);
+    return;
+  }
+  toast.clearBusy();
+  if (kind === "err") toast.error(text);
+  else if (kind === "warn") toast.warn(text);
+  else toast.ok(text);
 }
 
 function setButtonsBusy(busy) {
@@ -64,7 +70,6 @@ async function startRun(step, label, extra = {}) {
   try {
     await post("/api/run", { date, step, ...extra });
   } catch (e) {
-    setRunStatus(e.message, "err");
     toast.error(`${label} failed to start: ${e.message}`);
     return false;
   }
@@ -157,7 +162,10 @@ export async function poll() {
     return;
   }
 
-  setRunStatus(`${label} completed in ${elapsed}s`, "ok");
+  // Only announce a run this page started — not one that finished before
+  // a refresh.
+  if (runStart !== null) setRunStatus(`${label} completed in ${elapsed}s`, "ok");
+  else toast.clearBusy();
   dropDerivedCaches();
 
   // Order matters: the plan readback unhides the handler panel, handlers

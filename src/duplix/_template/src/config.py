@@ -132,6 +132,17 @@ class ReliefPassConfig(_Frozen):
     free_early_minutes: int = Field(default=60, ge=15, le=180)
 
 
+class ZCCutoffConfig(_Frozen):
+    """Zone-controller (ZC) end-of-shift cutoff (``allocator/eligibility.py``,
+    filter F5b / H21). A ZC is never given a normal flight whose STD is
+    later than ``minutes_before_shift_end`` before their nominal shift end
+    (default 60: an M ZC, shift ends 12:30, takes nothing after 11:30).
+    Hard rule, enforced in the eligibility matrix so the solver, fallbacks
+    and every post-pass respect it. 0 disables it."""
+
+    minutes_before_shift_end: int = Field(default=60, ge=0, le=240)
+
+
 class Config(_Frozen):
     allocation: AllocationConfig
     # Task 2a (2026-05-12): required_staffing removed. The per-shift
@@ -170,6 +181,7 @@ class Config(_Frozen):
     p2f_adjustment: P2FAdjustmentConfig = P2FAdjustmentConfig()
     break_pass: BreakPassConfig = BreakPassConfig()
     relief_pass: ReliefPassConfig = ReliefPassConfig()
+    zc_cutoff: ZCCutoffConfig = ZCCutoffConfig()
 
 
 def load_config(path: Path | str) -> Config:

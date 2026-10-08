@@ -8,7 +8,7 @@ export const load = slots.load;
 
 let setRunStatus = () => {};
 
-/** Report a source-file problem in the shared topbar status pill. */
+/** Report a source-file problem as a toast notification. */
 export function warn(message) {
   setRunStatus(message, "warn");
 }

@@ -31,7 +31,9 @@ export const FALLBACK_LEVEL_PALETTE = ["#e0e0e0", "#bdbdbd", "#9e9e9e", "#616161
 
 /** Shift nominal windows, in ops-day minutes from 00:00 D-day (N wraps
  *  into D+1). Mirror of allocator/windows.py:SHIFT_NOMINAL_MIN — the
- *  trend chart paints its bands and per-hour stats from these. */
+ *  trend chart paints its bands and per-hour stats from these. The
+ *  values here are the shipped hours; boot replaces them with the
+ *  server's (see setShiftWindows). */
 export const SHIFT_WINDOWS_MIN = {
   M:  [4 * 60,         12 * 60 + 30],
   M1: [6 * 60,         14 * 60 + 30],
@@ -39,6 +41,15 @@ export const SHIFT_WINDOWS_MIN = {
   A1: [14 * 60 + 30,   23 * 60],
   N:  [20 * 60 + 30,   24 * 60 + 5 * 60],   // 20:30 D -> 05:00 D+1
 };
+
+/** Swap in the hours the server is using — they can be changed in the
+ *  Setup sidebar. Edits the object in place so every module that imported
+ *  it sees the new hours. */
+export function setShiftWindows(windows) {
+  for (const [shift, range] of Object.entries(windows)) {
+    SHIFT_WINDOWS_MIN[shift] = range;
+  }
+}
 
 /** The operational day the trend chart covers: 25 hourly buckets from
  *  05:00 D through 05:00 D+1, the last one holding the preplan tail. */

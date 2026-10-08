@@ -12,6 +12,11 @@ Time arithmetic uses "ops-day minutes": minutes from 00:00 of the ops day
 ops_day_minutes = 120 + 1440 = 1560, which is inside N's window
 [1230, 1740] = [20:30 D, 05:00 D+1]. This convention sidesteps midnight-
 crossing edge cases everywhere downstream.
+
+The shift-hour tables below are the *shipped* hours. The Setup sidebar can
+change them (``configs/shift_times.json``); ``apply_shift_hours`` — see the
+end of this file — rewrites the tables in place, so every module that
+imported one sees the new hours without a restart.
 """
 
 from __future__ import annotations
@@ -21,6 +26,7 @@ from datetime import date as date_t
 from datetime import time as time_t
 
 from ..schemas import OpsClass, ShiftCode
+from . import shift_hours
 
 # ---------- shift hours (nominal) ----------
 # (start_offset, end_offset) in minutes from 00:00 of the ops day.
@@ -375,3 +381,69 @@ def is_in_std_outer_band(
     _, inner_hi = SHIFT_STD_WINDOW_INNER[shift]
     outer_hi = SHIFT_STD_WINDOW_OUTER_END[shift]
     return inner_hi < minutes <= outer_hi
+
+
+# ---------- editable shift hours ----------
+# The tables above hold the shipped hours. Everything that depends on a
+# shift's hours is a hand-tuned offset from its start or its end (A's
+# inner window opens 30 min after A starts, the ZC buffers are 90 min wide,
+# ...), so changing a shift's hours moves the dependent values by the same
+# amount instead of re-deriving them. Snapshotting the shipped tables here
+# keeps those offsets as the single source of truth.
+
+_SHIPPED_HOURS = dict(SHIFT_NOMINAL_MIN)
+_SHIPPED_INNER = dict(SHIFT_STD_WINDOW_INNER)
+_SHIPPED_OUTER_END = dict(SHIFT_STD_WINDOW_OUTER_END)
+_SHIPPED_ZC_START = dict(ZC_BUFFER_START_MIN)
+_SHIPPED_ZC_END = dict(ZC_BUFFER_END_MIN)
+_SHIPPED_AWKWARD = dict(AWKWARD_ROUTING_MIN)
+
+
+def _awkward_anchor(minute: int) -> ShiftCode:
+    """The shift whose end an H15 awkward-routing minute is measured
+    from: the 12:55-13:15 group sits on M's end, the 14:55-15:15 group on
+    M1's."""
+    return "M" if minute < 14 * 60 else "M1"
+
+
+def shipped_shift_hours() -> dict[ShiftCode, tuple[int, int]]:
+    """The hours the code ships with, ignoring any saved change."""
+    return dict(_SHIPPED_HOURS)
+
+
+def apply_shift_hours(hours: dict[str, tuple[int, int]]) -> None:
+    """Make ``hours`` (``{shift: (start, end)}`` in ops-day minutes — see
+    ``shift_hours.to_hours`` for validation) the live shift hours.
+
+    Rewrites the tables in place: the nominal hours, the STD distribution
+    windows, the tail ends, the ZC report buffers and the H15 awkward
+    routing. Passing the shipped hours restores the shipped tables
+    exactly. Callers must not do this while a run is in flight — the
+    engine reads the tables all the way through one.
+    """
+    live = {**_SHIPPED_HOURS, **hours}
+    d_start = {s: live[s][0] - _SHIPPED_HOURS[s][0] for s in live}
+    d_end = {s: live[s][1] - _SHIPPED_HOURS[s][1] for s in live}
+
+    for shift, (start, end) in live.items():
+        SHIFT_NOMINAL_MIN[shift] = (start, end)
+        SHIFT_TAIL_END_MIN[shift] = end + HANDOVER_WINDOW_MIN
+        lo, hi = _SHIPPED_INNER[shift]
+        SHIFT_STD_WINDOW_INNER[shift] = (lo + d_start[shift], hi + d_end[shift])
+        if shift in _SHIPPED_OUTER_END:
+            SHIFT_STD_WINDOW_OUTER_END[shift] = _SHIPPED_OUTER_END[shift] + d_end[shift]
+        s1, e1 = _SHIPPED_ZC_START[shift]
+        ZC_BUFFER_START_MIN[shift] = (s1 + d_start[shift], e1 + d_start[shift])
+        s2, e2 = _SHIPPED_ZC_END[shift]
+        ZC_BUFFER_END_MIN[shift] = (s2 + d_end[shift], e2 + d_end[shift])
+
+    AWKWARD_ROUTING_MIN.clear()
+    for minute, shifts in _SHIPPED_AWKWARD.items():
+        AWKWARD_ROUTING_MIN[minute + d_end[_awkward_anchor(minute)]] = shifts
+
+
+# Pick up hours saved from the Setup sidebar, so the CLI and the web
+# console plan with the same ones.
+_saved_hours = shift_hours.load_saved()
+if _saved_hours is not None:
+    apply_shift_hours(_saved_hours)

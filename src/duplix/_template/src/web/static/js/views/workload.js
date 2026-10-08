@@ -91,6 +91,11 @@ export function render() {
   rows.sort(COMPARATORS[sortKey] || (() => 0));
 
   const max = Math.max(1, ...rows.map((r) => Math.max(r.actual, r.hard_cap)));
+  if (!rows.length) {
+    $("#wl-table tbody").innerHTML =
+      `<tr><td colspan="10" class="subdued">No workload data yet — run Allocate.</td></tr>`;
+    return;
+  }
   $("#wl-table tbody").innerHTML = rows.map((r) => {
     const dev = r.actual - r.target_preferred;
     return `

@@ -14,9 +14,16 @@ that takes over from theirs::
 * N and A1 staff have no reliever and need none (nobody relieves
   them, and they are never released early).
 
-When a shift has more people than relievers (typically A + A1 vs. the
-smaller N), the people left over get NO reliever. Instead they are
-released early: every flight they hold is moved off the last
+A backup pool (2026-10-04): when there are more A people than N relievers,
+the A people left over are relieved by A1 staff of the same role (A1 works
+until 23:00, so they are on shift when A ends at 21:00). An A1 person who
+already relieves an M1 colleague may take one A person as well — the two
+handovers are hours apart (14:30 vs 21:00). Among A1 candidates the most
+feasible one wins: not already relieving anyone, then the fewest flights of
+their own in the A handover window, then the lightest workload.
+
+Only when N AND A1 are both used up do the people left over get NO reliever.
+Those are released early: every flight they hold is moved off the last
 ``free_early_minutes`` (60) of their shift, so they finish their work
 before shift end rather than leaving it for somebody else.
 
@@ -55,6 +62,7 @@ from ..schemas import (
 from .caps import acceptable_max_for, hard_cap_for
 from .eligibility import sheet_target_for
 from .windows import (
+    HANDOVER_WINDOW_MIN,
     SHIFT_NOMINAL_MIN,
     SpacingKey,
     spacing_clear,
@@ -65,6 +73,9 @@ from .windows import (
 # Who relieves whom. N and A1 are deliberately absent: neither has a
 # reliever (and so neither is ever released early).
 RELIEF_SHIFT: dict[str, str] = {"M": "A", "M1": "A1", "A": "N"}
+# Backup relievers, keyed by the shift that needs one. A people left over
+# once N is used up are relieved by A1 (still on shift at 21:00).
+BACKUP_RELIEF_SHIFT: dict[str, str] = {"A": "A1"}
 
 FREE_EARLY_MIN_DEFAULT = 60
 # A flight needs the handler until ~STD+20 (post-airborne work), so a
@@ -91,6 +102,7 @@ class ReliefPlan:
     reliever_name: dict[str, str] = field(default_factory=dict)    # staff -> reliever name
     freed: dict[str, int] = field(default_factory=dict)            # staff -> cutoff (ops min)
     uncovered: list[str] = field(default_factory=list)             # no reliever AND not freed
+    backup: set[str] = field(default_factory=set)                  # staff whose reliever is a backup (A1)
     n_swaps: int = 0
     n_transfers: int = 0
     workload_notes: dict[str, list[str]] = field(default_factory=lambda: defaultdict(list))
@@ -269,6 +281,28 @@ def plan_relief(
             needs[(RELIEF_SHIFT[s.shift_today], s.role)].append(s)
         pool[(s.shift_today, s.role)].append(s)
 
+    def _best_backup(
+        s: StaffMember, backup_pool: list[StaffMember], taken: set[str],
+    ) -> StaffMember | None:
+        """Most feasible backup reliever for ``s`` (an A person with no N
+        reliever left): not already relieving anyone, then fewest of their
+        own flights in ``s``'s handover window, then lightest workload."""
+        end = SHIFT_NOMINAL_MIN[s.shift_today][1]
+        lo, hi = end - HANDOVER_LEAD_MIN, end + HANDOVER_WINDOW_MIN
+        duties: dict[str, int] = defaultdict(int)
+        for rid in plan.reliever_of.values():
+            duties[rid] += 1
+        best: tuple | None = None
+        pick: StaffMember | None = None
+        for r in backup_pool:
+            if r.employee_id in taken:
+                continue
+            busy = sum(1 for u in keys.get(r.employee_id, ()) if lo <= f_min(u) <= hi)
+            key = (duties[r.employee_id], busy, count[r.employee_id], r.name)
+            if best is None or key < best:
+                best, pick = key, r
+        return pick
+
     partner_pref: dict[str, list[str]] = defaultdict(list)
     for p in pairs:
         if p.prev_employee_id and p.next_employee_id:
@@ -278,7 +312,14 @@ def plan_relief(
         needs.items(), key=lambda kv: (kv[0][0], kv[0][1].value),
     ):
         relievers = sorted(pool.get((relief_shift, role), []), key=lambda x: x.name)
-        surplus = max(0, len(cands) - len(relievers))
+        backup_shift = BACKUP_RELIEF_SHIFT.get(cands[0].shift_today) if cands else None
+        backup_pool = (
+            sorted(pool.get((backup_shift, role), []), key=lambda x: x.name)
+            if backup_shift else []
+        )
+        # Early release only for people NEITHER the main shift NOR the
+        # backup shift can cover.
+        surplus = max(0, len(cands) - len(relievers) - len(backup_pool))
 
         # Hardest-to-release last: anyone holding P2F / INTL flights in
         # their final hour can't be cleared.
@@ -327,6 +368,7 @@ def plan_relief(
         # Those who were hardest to release are matched first.
         to_match = [s for s in reversed(order) if s.employee_id not in freed_ids]
         used: set[str] = set()
+        used_backup: set[str] = set()
         for s in sorted(to_match, key=lambda x: x.name):
             pick = None
             for nid in partner_pref.get(s.employee_id, ()):
@@ -337,12 +379,22 @@ def plan_relief(
                     break
             if pick is None:
                 pick = next((r for r in relievers if r.employee_id not in used), None)
+            is_backup = False
+            if pick is None and backup_pool:
+                pick = _best_backup(s, backup_pool, used_backup)
+                is_backup = pick is not None
             if pick is None:
                 plan.uncovered.append(s.employee_id)
                 continue
-            used.add(pick.employee_id)
+            (used_backup if is_backup else used).add(pick.employee_id)
             plan.reliever_of[s.employee_id] = pick.employee_id
             plan.reliever_name[s.employee_id] = pick.name
+            if is_backup:
+                plan.backup.add(s.employee_id)
+                plan.log_lines.append(
+                    f"{s.shift_today}/{role.value}: {s.name} relieved by "
+                    f"{backup_shift} backup {pick.name}"
+                )
 
         # Last resort for anyone still without a reliever whose full
         # window couldn't be cleared: release them as early as we can
@@ -370,7 +422,11 @@ def plan_relief(
 
     # ---- notes + rows -------------------------------------------------
     for sid, rid in plan.reliever_of.items():
-        plan.note(sid, f"Reliever: {plan.reliever_name[sid]}")
+        plan.note(
+            sid,
+            f"Reliever: {plan.reliever_name[sid]}"
+            + (" (A1 backup)" if sid in plan.backup else ""),
+        )
         plan.note(rid, f"Relieves: {staff_by_id[sid].name}")
     for sid, cut in plan.freed.items():
         s = staff_by_id[sid]

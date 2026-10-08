@@ -241,7 +241,9 @@ def _suggestions_for_flight(
             elig_no_buffer = EligibilityContext(
                 ops_day=elig_ctx.ops_day,
                 p2f_handler_by_shift=elig_ctx.p2f_handler_by_shift,
+                extra_p2f_handlers_by_shift=elig_ctx.extra_p2f_handlers_by_shift,
                 p2f_flight_minutes_by_handler={},  # blank → no buffer
+                zc_end_cutoff_min=elig_ctx.zc_end_cutoff_min,
             )
             reason = elig_check(flight, s, elig_no_buffer)
             if reason is None:

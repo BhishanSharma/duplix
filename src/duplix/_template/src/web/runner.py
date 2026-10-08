@@ -148,6 +148,11 @@ def _dispatch(
     from ..step2_extract_roster import run as run_step2
     from ..step3_allocate_flights import run as run_allocate
 
+    if sub_command in ("plan", "all", "step1", "step2"):
+        # A fresh Plan rebuilds flights + roster, so any allocation still
+        # in memory is out of date until Allocate stores a new one.
+        state.allocation_stale = True
+
     if sub_command == "plan":
         run_plan(state, d_day, CONFIG_PATH)
         return {"FLIGHTS": len(state.allocatable_cleaned()),

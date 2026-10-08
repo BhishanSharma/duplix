@@ -21,6 +21,8 @@ Hard constraints enforced HERE:
   H13  AM exclusion
   H20  nominated P2F handlers never take international flights (frees
        up their day for more P2F work)
+  H21  ZCs take no normal flight in the last ``zc_end_cutoff_min`` (60)
+       minutes of their shift — their STD must be <= nominal end - 60
 
 Hard constraints NOT enforced here (deferred to the solver):
   H1   exactly one staff per flight       — solver objective
@@ -107,6 +109,9 @@ class ExcludeReason(StrEnum):
     OUT_OF_SHIFT = "STD outside shift's distribution window (user 2026-05-12)"
     STD_OUTSIDE_ALL_WINDOWS = "STD outside all shift windows"
     OVERRIDE_CUTOFF = "STD past staff's per-day STD cutoff (H11)"
+    ZC_END_CUTOFF = (
+        "ZC takes no flight in the last hour of their shift (H21)"
+    )
     NEWBIE_INTERNATIONAL = "newbies excluded from international flights (H12a)"
     INTL_SHIFT_EDGE = "international: staff within ±60 min of shift start/end (H12b — retired)"
     INTL_SHIFT_COVERAGE = (
@@ -130,6 +135,36 @@ class EligibilityContext:
     M1 and A1 P2F flights drop the handler restriction (any P2F-licensed
     staff on shift can take them)."""
 
+    extra_p2f_handlers_by_shift: dict[ShiftCode, tuple[str, ...]] = field(
+        default_factory=dict,
+    )
+    """shift -> ADDITIONAL handlers beyond ``p2f_handler_by_shift``. One
+    handler can take at most 8 P2F flights (H17), so a shift with more
+    than 8 needs several. ``p2f_handler_by_shift`` stays the shift's
+    primary handler (it hosts pre-planning); every handler of the shift,
+    primary or extra, is eligible for that shift's P2F flights."""
+
+    def handlers_for(self, shift: ShiftCode | None) -> tuple[str, ...]:
+        """Every handler (primary first) nominated for ``shift``."""
+        if shift is None:
+            return ()
+        primary = self.p2f_handler_by_shift.get(shift)
+        out = [primary] if primary else []
+        out.extend(e for e in self.extra_p2f_handlers_by_shift.get(shift, ())
+                   if e not in out)
+        return tuple(out)
+
+    def is_p2f_handler(self, shift: ShiftCode | None, employee_id: str) -> bool:
+        return employee_id in self.handlers_for(shift)
+
+    @property
+    def all_p2f_handler_ids(self) -> set[str]:
+        """Every nominated handler, primary and extra, across shifts."""
+        ids = set(self.p2f_handler_by_shift.values())
+        for extra in self.extra_p2f_handlers_by_shift.values():
+            ids.update(extra)
+        return ids
+
     p2f_flight_minutes_by_handler: dict[str, list[int]] = field(default_factory=dict)
     """employee_id -> list of P2F flight STDs (in ops-day minutes) the
     handler is dedicated to. Drives H4's no-normal-flight window."""
@@ -139,6 +174,10 @@ class EligibilityContext:
     # employee_id) where flight_key = ``f"{flt}|{std.isoformat()}"``.
     # When present, F6 skips the P2F buffer check for that exact pair.
     skip_p2f_buffer_pairs: frozenset[tuple[str, str]] = frozenset()
+
+    zc_end_cutoff_min: int = 60
+    """H21: a ZC's flights must have STD <= nominal shift end minus this
+    many minutes. 0 disables. Set from ``config.zc_cutoff``."""
 
 
 def check(
@@ -161,8 +200,7 @@ def check(
     if flight.ops_class == OpsClass.P2F:
         if staff.shift_today not in ("M", "A", "N"):
             return ExcludeReason.P2F_NOT_HANDLER  # M1/A1 excluded
-        nominated = ctx.p2f_handler_by_shift.get(staff.shift_today)
-        if nominated != staff.employee_id:
+        if not ctx.is_p2f_handler(staff.shift_today, staff.employee_id):
             return ExcludeReason.P2F_NOT_HANDLER
     # F5: STD distribution window (user direction 2026-05-12, §1).
     # A flight is eligible for a shift only if its STD falls in that
@@ -172,6 +210,23 @@ def check(
         flight.std, flight.date, ctx.ops_day, staff.shift_today,
     ):
         return ExcludeReason.OUT_OF_SHIFT
+    # F5b (H21): ZCs get no flight in the last hour of their shift. The
+    # STD must be <= nominal shift end - zc_end_cutoff_min. P2F flights
+    # are exempt: F4 is the sole authority on who takes those, and a
+    # nominated ZC handler would otherwise leave a late P2F flight with
+    # zero eligible staff.
+    if (
+        staff.role == Role.ZC
+        and ctx.zc_end_cutoff_min > 0
+        and flight.ops_class != OpsClass.P2F
+    ):
+        nominal = SHIFT_NOMINAL_MIN.get(staff.shift_today)
+        if nominal is not None:
+            std_min = std_to_ops_day_minutes(
+                flight.std, flight.date, ctx.ops_day,
+            )
+            if std_min > nominal[1] - ctx.zc_end_cutoff_min:
+                return ExcludeReason.ZC_END_CUTOFF
     # F6: P2F handler buffer (H4, user direction 2026-09-26). For each
     # P2F flight the handler runs, no normal flight from 2 hrs before
     # to 1 hr after its STD (prep and turnaround time). Applies to
@@ -226,7 +281,7 @@ def check(
     if (
         flight.is_international
         and flight.ops_class != OpsClass.P2F
-        and ctx.p2f_handler_by_shift.get(staff.shift_today) == staff.employee_id
+        and ctx.is_p2f_handler(staff.shift_today, staff.employee_id)
     ):
         return ExcludeReason.P2F_HANDLER_NO_INTL
     return None

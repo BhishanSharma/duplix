@@ -65,7 +65,10 @@ function init() {
 
 /** First paint. Each readback is a small payload and the server is
  *  threaded, so these go out together rather than in a chain. */
-function boot() {
+async function boot() {
+  // The trend chart paints shift bands from the hours the server is
+  // using, which the operator can change — fetch them before it draws.
+  await setup.syncShiftWindows();
   // The operating date comes from the server, not the browser: this
   // console is driven from whichever machine is free, and a laptop on a
   // stale clock or another timezone would otherwise plan the wrong day.

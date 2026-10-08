@@ -40,6 +40,7 @@ def read_plan_summary(state: AppState) -> dict[str, Any]:
         return -(-a // b) if b else 0
 
     with state.lock:
+        allocation_ready = bool(state.allocations) and not state.allocation_stale
         flights_by_class = {o.value: 0 for o in OpsClass}
         for ops, rows in state.cleaned.items():
             flights_by_class[ops.value] = len(rows)
@@ -109,6 +110,10 @@ def read_plan_summary(state: AppState) -> dict[str, Any]:
         "night_staff_total": staff_by_shift["N"],
         "coverage_by_shift": coverage_by_shift,
         "p2f_bars": p2f_bars,
+        # True only when an allocation exists AND it is current — i.e.
+        # something is actually ready to download. The dashboard shows
+        # the download button on this alone, not merely "Plan has run".
+        "allocation_ready": allocation_ready,
     }
 
 
@@ -142,17 +147,29 @@ def read_handlers(state: AppState) -> dict[str, Any]:
         d_day = state.run_date
 
         shift_today_by_id: dict[str, str] = {}
+        license_by_id: dict[str, str | None] = {}
         name_to_id: dict[str, str] = {}
+        # "Not doing P2F today" rows (type=p2f_exclude).
+        excluded_names = {
+            (r.get("employee") or "").strip().upper()
+            for r in state.overrides
+            if (r.get("type") or "").lower() == "p2f_exclude"
+            and (r.get("employee") or "").strip()
+        }
+        excluded_ids: set[str] = set()
         p2f_nominees: dict[str, list[dict[str, Any]]] = {}
         for av in state.availability:
             if av.name:
                 name_to_id[av.name.strip().upper()] = av.employee_id
+                if av.name.strip().upper() in excluded_names:
+                    excluded_ids.add(av.employee_id)
             if not is_live(state, av):
                 continue
             shift_today_by_id[av.employee_id] = av.current_shift or ""
+            license_by_id[av.employee_id] = av.license
             status = canonical_status(av.status.value)
             shift = STATUS_TO_P2F_HANDLER_SHIFT.get(status) if status else None
-            if shift:
+            if shift and av.employee_id not in excluded_ids:
                 p2f_nominees.setdefault(shift, []).append({
                     "name": av.name, "employee_id": av.employee_id,
                     "shift": shift, "role": av.role.value,
@@ -183,6 +200,19 @@ def read_handlers(state: AppState) -> dict[str, Any]:
                     "Fix the override's shift or nominate someone else."
                 )
                 continue
+            if eid in excluded_ids:
+                issues.append(
+                    f'P2F nomination "{name}" ignored: {name} is marked '
+                    "\"not doing P2F today\"."
+                )
+                continue
+            from ...allocator.p2f_autofill import has_confirmed_p2f_licence
+            if not has_confirmed_p2f_licence(license_by_id.get(eid)):
+                issues.append(
+                    f'P2F nomination "{name}" ({shift}) is not valid: the '
+                    "roster does not list them as P2F licensed."
+                )
+                continue
             already = any(
                 n["employee_id"] == eid for n in p2f_nominees.get(shift, [])
             )
@@ -207,6 +237,37 @@ def read_handlers(state: AppState) -> dict[str, Any]:
                 if start <= std_min <= end:
                     p2f_count_by_shift[shift] += 1
                     break
+
+        # Top each shift up to the handlers it needs (one per 8 P2F
+        # flights) from the roster's P2F licence column, only with people
+        # confirmed valid — the same rule the allocator applies (see
+        # p2f_autofill). Existing nominees are kept; only the shortfall
+        # is filled.
+        from ...allocator.p2f_autofill import (
+            Candidate,
+            autofill_handlers,
+            handlers_needed,
+        )
+        needed_map = {
+            s: handlers_needed(p2f_count_by_shift.get(s, 0))
+            for s in P2F_HANDLER_ELIGIBLE_SHIFTS
+        }
+        picked = autofill_handlers(
+            (Candidate(av.employee_id, av.name, av.role.value,
+                       av.current_shift, av.license)
+             for av in state.availability if is_live(state, av)),
+            needed_map,
+            {sh: [n["employee_id"] for n in lst]
+             for sh, lst in p2f_nominees.items()},
+            excluded_ids,
+        )
+        for shift, cands in picked.items():
+            for c in cands:
+                p2f_nominees.setdefault(shift, []).append({
+                    "name": c.name, "employee_id": c.employee_id,
+                    "shift": shift, "role": c.role,
+                    "source": "licence_auto",
+                })
 
         run_date = run_date_iso(state)
 
@@ -244,6 +305,8 @@ def read_handlers(state: AppState) -> dict[str, Any]:
         "p2f_flight_count_by_shift": p2f_count_by_shift,
         "shift_status": shift_status,
         "issues": issues,
+        "p2f_excluded": sorted(excluded_ids),
+        "p2f_excluded_names": sorted(excluded_names),
         "plan_has_run": plan_has_run,
         "ready": ready,
     }
@@ -289,6 +352,7 @@ def read_roster_full(state: AppState) -> dict[str, Any]:
     back on a shift, so the search list can't shrink when a person is
     taken off it.
     """
+    from ...allocator.p2f_autofill import has_confirmed_p2f_licence
     names: list[dict[str, Any]] = []
     seen: set[str] = set()
     with state.lock:
@@ -306,6 +370,10 @@ def read_roster_full(state: AppState) -> dict[str, Any]:
                 "shift": av.current_shift or "",
                 "status": av.status.value,
                 "assignable": av.assignable,
+                "employee_id": av.employee_id,
+                # Confirmed from the roster's licence column; the UI only
+                # offers P2F handler for these people, on their own shift.
+                "p2f_licensed": has_confirmed_p2f_licence(av.license),
             })
     names.sort(key=lambda x: x["name"])
     return {"run_date": d_iso, "names": names}

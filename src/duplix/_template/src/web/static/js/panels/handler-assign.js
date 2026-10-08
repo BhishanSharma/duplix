@@ -10,7 +10,7 @@
  */
 
 import { $, escapeHTML } from "../core/dom.js";
-import { get, post } from "../core/api.js";
+import { get, post, del } from "../core/api.js";
 import * as store from "../core/store.js";
 import * as autocomplete from "../ui/autocomplete.js";
 import * as handlersPanel from "./handlers.js";
@@ -20,16 +20,32 @@ let query = "";
 let saving = false;
 let roster = [];   // full roster for the run date, from /api/roster_full
 let notice = "";
+let excludedList = [];   // names marked "not doing P2F today"
 
 const runDate = () => ($("#run-date") || {}).value || "";
 
-/** value = "P2F:<shift>"; label = what the pane shows. */
-const ROLE_OPTIONS = [
-  { value: "", label: "(assign as)" },
-  { value: "P2F:M", label: "P2F handler — M" },
-  { value: "P2F:A", label: "P2F handler — A" },
-  { value: "P2F:N", label: "P2F handler — N" },
-];
+/** The choices offered for one person. A P2F handler is only offered
+ *  for the person's OWN shift today (M / A / N) and only when the roster
+ *  lists them as P2F licensed. Anyone can be taken off P2F for today. */
+function roleOptionsFor(person) {
+  const opts = [{ value: "", label: "(assign as)" }];
+  if (excludedNames().has(String(person.name).trim().toUpperCase())) {
+    opts.push({ value: "ALLOW", label: "Allow P2F again" });
+    return opts;
+  }
+  if (person.p2f_licensed && person.assignable
+      && ["M", "A", "N"].includes(person.shift)) {
+    opts.push({ value: `P2F:${person.shift}`,
+                label: `P2F handler — ${person.shift}` });
+  }
+  opts.push({ value: "EXCLUDE", label: "Not doing P2F today" });
+  return opts;
+}
+
+/** Upper-cased names currently marked "not doing P2F today". */
+function excludedNames() {
+  return new Set(excludedList.map((n) => String(n).trim().toUpperCase()));
+}
 
 /** name -> current handler role label(s), from the last /api/handlers
  *  payload (which itself reads override rows + roster shorthand). */
@@ -46,15 +62,16 @@ function currentRoleLabel(name) {
   return roles.join(", ");
 }
 
-function options() {
-  return ROLE_OPTIONS.map((opt) =>
+function options(person) {
+  return roleOptionsFor(person).map((opt) =>
     `<option value="${opt.value}">${escapeHTML(opt.label)}</option>`
   ).join("");
 }
 
 function row(person) {
   const name = escapeHTML(person.name);
-  const current = currentRoleLabel(person.name);
+  const isExcluded = excludedNames().has(String(person.name).trim().toUpperCase());
+  const current = isExcluded ? "Not doing P2F today" : currentRoleLabel(person.name);
   const statusLine = current
     ? `Currently: ${escapeHTML(current)}`
     : escapeHTML(person.shift ? `On ${person.shift}` : (person.status || ""));
@@ -64,7 +81,7 @@ function row(person) {
         <span class="handler-assign-name">${name}</span>
         <small class="handler-assign-status">${statusLine}</small>
       </div>
-      <select class="handler-assign-select" aria-label="Handler role for ${name}">${options()}</select>
+      <select class="handler-assign-select" aria-label="Handler role for ${name}">${options(person)}</select>
       <button class="handler-assign-apply" type="button">Apply</button>
     </div>`;
 }
@@ -97,6 +114,7 @@ export async function load() {
         store.handlers.load(),   // so "Currently: ..." reflects the latest
       ]);
       roster = payload.names || [];
+      excludedList = ((store.handlers.data || {}).p2f_excluded_names) || [];
     } catch (error) {
       console.warn("roster_full load failed (handler-assign)", error);
       roster = [];
@@ -114,23 +132,36 @@ async function apply(name, roleValue) {
   if (!date) return;
   saving = true;
   try {
-    const shift = roleValue.split(":")[1];
-    const result = await post("/api/staged_form/p2f", {
-      ops_date: date, employee: name, shift,
-    });
-    const ok = (result.applied || {}).p2f > 0 || result.ok;
-    const label = `P2F handler (${shift})`;
-    notice = ok
-      ? `${name} nominated as ${label}.`
-      : `Saved, but couldn't confirm it took effect for ${name} — check the name and try again.`;
-    // The nomination lives in override rows, read fresh by /api/handlers —
-    // reload it so the new "Currently: ..." tag shows right away, the
-    // handler cards update, and the Allocate gate re-checks itself.
+    let label;
+    if (roleValue === "EXCLUDE") {
+      await post("/api/staged_form/p2f_exclude", { ops_date: date, employee: name });
+      notice = `${name} will not be used for P2F today.`;
+    } else if (roleValue === "ALLOW") {
+      // Remove the p2f_exclude row(s) for this person.
+      const ov = await get("/api/overrides");
+      const rows = (ov.rows || []).filter((r) =>
+        (r.payload.type || "").toLowerCase() === "p2f_exclude"
+        && String(r.payload.employee || "").trim().toUpperCase() === name.trim().toUpperCase());
+      for (const r of rows.sort((a, b) => b.index - a.index)) {
+        await del(`/api/overrides/${r.index}`);
+      }
+      notice = `${name} can be used for P2F again.`;
+    } else {
+      const shift = roleValue.split(":")[1];
+      const result = await post("/api/staged_form/p2f", {
+        ops_date: date, employee: name, shift,
+      });
+      const ok = (result.applied || {}).p2f > 0 || result.ok;
+      label = `P2F handler (${shift})`;
+      notice = ok
+        ? `${name} nominated as ${label}.`
+        : `Saved, but couldn't confirm it took effect for ${name} — check the name and try again.`;
+    }
     await store.handlers.load({ force: true });
     handlersPanel.render();
     await load();
   } catch (error) {
-    toast.error(`Could not nominate ${name}: ${error.message}`);
+    toast.error(`Could not update ${name}: ${error.message}`);
   } finally {
     saving = false;
   }

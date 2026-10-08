@@ -154,3 +154,77 @@ def test_a1_has_no_reliever_and_is_never_released():
     new_rows, plan = plan_relief(rows, flights, staff, matrix, D, [])
     assert not plan.reliever_of and not plan.freed and not plan.uncovered
     assert [r.staff_employee_id for r in new_rows] == [r.staff_employee_id for r in rows]
+
+
+# ---------- A1 backup relievers (2026-10-04) ----------
+
+def test_a_leftovers_are_relieved_by_a1_before_anyone_is_released_early():
+    # 5 A, only 2 N -> 3 left over; 3 A1 are free to cover them.
+    staff = (
+        [_staff(f"a{i}", "A") for i in range(5)]
+        + [_staff(f"n{i}", "N") for i in range(2)]
+        + [_staff(f"x{i}", "A1") for i in range(3)]
+    )
+    stds = {f"a{i}": ["15:00", "20:30"] for i in range(5)}
+    rows, flights, matrix = _build(staff, stds)
+    new_rows, plan = plan_relief(rows, flights, staff, matrix, D, [])
+    assert not plan.freed and not plan.uncovered
+    assert set(plan.reliever_of) == {f"a{i}" for i in range(5)}
+    assert len(plan.backup) == 3
+    by_id = {s.employee_id: s for s in staff}
+    for sid in plan.backup:
+        assert by_id[plan.reliever_of[sid]].shift_today == "A1"
+    assert max(Counter(plan.reliever_of.values()).values()) == 1
+    # the reliever shows up in the RELIEVED_BY column
+    out = relabel_pair_columns(new_rows, flights, staff, [], D, relief=plan)
+    named = {r.relieved_by_name for r in out if r.relieved_by_name}
+    assert {by_id[plan.reliever_of[sid]].name for sid in plan.backup} <= named
+    # workload note flags it
+    assert all("(A1 backup)" in " ".join(plan.workload_notes[sid]) for sid in plan.backup)
+
+
+def test_backup_prefers_a1_who_is_free_and_not_already_relieving():
+    # m1 is relieved by x_busy (A1) first; the single A leftover must go
+    # to the OTHER A1 (x_free), who has no duty and no flight at handover.
+    staff = (
+        [_staff("m1_0", "M1")]
+        + [_staff("x_busy", "A1"), _staff("x_free", "A1")]
+        + [_staff(f"a{i}", "A") for i in range(2)]
+        + [_staff("n0", "N")]
+    )
+    stds = {"m1_0": ["08:00"], "a0": ["15:00"], "a1": ["15:00"],
+            "x_busy": ["20:50"], "x_free": ["16:00"]}
+    rows, flights, matrix = _build(staff, stds)
+    _, plan = plan_relief(rows, flights, staff, matrix, D, [])
+    assert not plan.uncovered and not plan.freed
+    (leftover,) = plan.backup
+    # whoever the M1 person got, the backup is a different A1 person
+    m1_reliever = plan.reliever_of["m1_0"]
+    assert plan.reliever_of[leftover] != m1_reliever
+
+
+def test_a1_covers_at_most_one_a_person_then_early_release_is_the_fallback():
+    # 5 A, 1 N, 2 A1 -> 4 left over; 2 covered by A1, 2 released early.
+    staff = (
+        [_staff(f"a{i}", "A") for i in range(5)]
+        + [_staff("n0", "N")]
+        + [_staff(f"x{i}", "A1") for i in range(2)]
+    )
+    stds = {f"a{i}": ["15:00", "18:00"] for i in range(5)}
+    rows, flights, matrix = _build(staff, stds)
+    _, plan = plan_relief(rows, flights, staff, matrix, D, [])
+    assert len(plan.backup) == 2
+    assert len(plan.freed) == 2 and not plan.uncovered
+    assert max(Counter(plan.reliever_of.values()).values()) == 1
+
+
+def test_backup_respects_role():
+    staff = (
+        [_staff("zc_a", "A", Role.ZC), _staff("zc_a2", "A", Role.ZC)]
+        + [_staff("zc_n", "N", Role.ZC)]
+        + [_staff("staff_x", "A1", Role.STAFF)]      # wrong role, must not be used
+    )
+    rows, flights, matrix = _build(staff, {"zc_a": ["15:00"], "zc_a2": ["15:00"]})
+    _, plan = plan_relief(rows, flights, staff, matrix, D, [])
+    assert not plan.backup
+    assert len(plan.freed) == 1

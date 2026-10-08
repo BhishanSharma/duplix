@@ -5,8 +5,9 @@
   align-items: center;
   background: var(--bg-card);
   border-bottom: 1px solid var(--line);
+  border-top: 3px solid var(--brand);
   padding: 0 16px;
-  height: 52px;
+  height: 55px;
   gap: 16px;
   position: sticky;
   top: 0;
@@ -14,9 +15,28 @@
 }
 
 .brand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   font-weight: 600;
   letter-spacing: -0.01em;
   margin-right: 8px;
+  color: var(--brand);
+}
+
+.brand-logo {
+  height: 4vh;
+  width: 8vw;
+}
+
+.brand-sub {
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--subdued);
+  padding-left: 8px;
+  border-left: 1px solid var(--line);
 }
 
 .tabs {
@@ -53,10 +73,7 @@
   align-items: center;
 }
 
-/* The status pill is the one topbar-actions child allowed to shrink —
-   a long error message truncates (see run-pill.css) instead of
-   squeezing the date field or pushing buttons out of the bar. */
-.topbar-actions > *:not(#run-status-pill) {
+.topbar-actions > * {
   flex-shrink: 0;
 }
 
@@ -174,6 +191,10 @@ main {
 
   .brand {
     margin-right: 2px;
+  }
+
+  .brand-sub {
+    display: none;
   }
 
   .tab {

@@ -20,18 +20,28 @@ export const template = `<div id="plan-block" hidden></div>`;
  *  the handler panel, the Allocate button, and the download menu — a
  *  user shouldn't be able to click Allocate (or download a workbook)
  *  before there's anything for it to act on.
+ *  The download menu additionally needs `allocationReady` (an Allocate has
+ *  finished since the last Plan).
  *  Once the handler panel is shown it stays shown — hiding it on a
  *  later refresh produced a flicker between Plan completing and the
  *  next poll. Allocate/download don't have that history, so they
  *  track planHasRun directly both ways. */
-export function setPostPlanUI(planHasRun) {
+export function setPostPlanUI(planHasRun, allocationReady = false) {
   if (!planHasRun) {
     $("#handlers-block").hidden = true;
   }
   const runBtn = $("#run-btn");
   const exportMenu = $(".export-menu");
   if (runBtn) runBtn.hidden = !planHasRun;
-  if (exportMenu) exportMenu.hidden = !planHasRun;
+  // Download only once there is an allocation to download — Plan alone
+  // produces nothing to export.
+  if (exportMenu) {
+    exportMenu.hidden = !(planHasRun && allocationReady);
+    if (exportMenu.hidden) {
+      const list = $("#export-menu-list");
+      if (list) list.hidden = true;
+    }
+  }
 }
 
 export async function load() {
@@ -47,7 +57,7 @@ export async function load() {
   // Visibility first, before any rendering work: if a later step throws,
   // the dashboard still reflects the correct shown/hidden state.
   $("#plan-block").hidden = !planHasRun;
-  setPostPlanUI(planHasRun);
+  setPostPlanUI(planHasRun, Boolean(p.allocation_ready));
 
   if (Boolean(p.text) && totalFlights === 0) {
     inputs.warn(

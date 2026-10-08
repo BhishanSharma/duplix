@@ -1,0 +1,246 @@
+/* Theme layer — the "airline site" look: pale blue canvas, white rounded
+   cards with soft shadows, a deep-blue segmented tab bar, pill buttons.
+   Loaded LAST so it restyles the partials without editing each one.
+   To go back to the plain look, remove its @import from styles.css. */
+
+:root {
+  --bg: #eef3ff;
+  --bg-elev: #f4f7ff;
+  --hover: #eef2ff;
+  --line: #dde4f5;
+  --subdued: #5b6485;
+  --text: #14193a;
+  --radius: 10px;
+  --radius-lg: 16px;
+  --card-shadow: 0 4px 22px rgba(0, 27, 148, 0.07);
+  --focus-ring: 0 0 0 3px rgba(0, 27, 148, 0.16);
+}
+
+body {
+  background: linear-gradient(180deg, #e3edff 0%, #f1f5ff 220px, #f7f9ff 100%) fixed;
+}
+
+/* ---- top bar ---- */
+.topbar {
+  background: #ffffff;
+  border-top: 0;
+  border-bottom: 0;
+  height: 60px;
+  box-shadow: 0 2px 14px rgba(0, 27, 148, 0.08);
+}
+
+.tabs {
+  gap: 2px;
+  padding: 3px;
+  background: var(--bg);
+  border-radius: 999px;
+}
+
+.tab {
+  border-radius: 999px;
+  padding: 7px 16px;
+  font-weight: 500;
+}
+
+.tab:hover {
+  background: #e1e9ff;
+  color: var(--brand);
+}
+
+.tab.active {
+  background: var(--brand);
+  color: #ffffff;
+  box-shadow: 0 2px 8px rgba(0, 27, 148, 0.28);
+}
+
+/* ---- buttons: pills ---- */
+button.primary,
+button.ghost {
+  border-radius: 999px;
+  padding: 7px 18px;
+  font-weight: 500;
+}
+
+button.ghost {
+  border-color: var(--line);
+  color: var(--brand);
+}
+
+button.ghost:hover {
+  background: var(--hover);
+  border-color: #c5d0f0;
+}
+
+button.primary {
+  box-shadow: 0 3px 10px rgba(0, 27, 148, 0.25);
+}
+
+button.icon-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  border-radius: 50%;
+  width: 36px;
+  height: 36px;
+  min-width: 36px;
+  padding: 0;
+}
+
+button.icon-button svg {
+  flex: none;
+  width: 17px;
+  height: 17px;
+}
+
+button:focus-visible,
+input:focus-visible,
+select:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+/* ---- inputs ---- */
+input[type="text"],
+input[type="number"],
+input[type="date"],
+input[type="search"],
+select,
+textarea {
+  border-radius: var(--radius);
+  border-color: var(--line);
+  background: #ffffff;
+}
+
+.topbar-actions input[type="date"] {
+  border-radius: 999px;
+  padding: 6px 14px;
+}
+
+/* ---- cards ---- */
+.stat-card,
+.block {
+  border: 1px solid #e6ecfa;
+  border-radius: var(--radius-lg);
+  box-shadow: var(--card-shadow);
+}
+
+.stat-card {
+  padding: 18px 20px;
+}
+
+.stat-value {
+  color: var(--brand);
+}
+
+.stat-value.warn { color: var(--warn); }
+.stat-value.danger { color: var(--danger); }
+
+.block h2 {
+  font-size: 17px;
+  font-weight: 650;
+  color: var(--text);
+}
+
+/* ---- tables ---- */
+.scroll-wrap {
+  border: 1px solid #e6ecfa;
+  border-radius: var(--radius-lg);
+  box-shadow: var(--card-shadow);
+}
+
+table thead th {
+  background: #f1f5ff;
+  color: var(--brand);
+  border-bottom: 1px solid var(--line);
+}
+
+table tbody td {
+  border-bottom-color: #edf1fb;
+}
+
+table tbody tr:hover {
+  background: #f6f8ff;
+}
+
+/* ---- overlays ---- */
+.modal {
+  border-radius: var(--radius-lg);
+}
+
+.drawer {
+  border-radius: var(--radius-lg) 0 0 var(--radius-lg);
+}
+
+.export-menu-list {
+  border-radius: var(--radius);
+  box-shadow: var(--card-shadow);
+}
+
+.export-menu-item:hover {
+  background: var(--hover);
+  color: var(--brand);
+}
+
+/* ---- no visible scrollbars anywhere (scrolling still works) ---- */
+* {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+*::-webkit-scrollbar {
+  display: none;
+  width: 0;
+  height: 0;
+}
+
+/* ---- checkboxes / toggles ---- */
+input[type="checkbox"],
+input[type="radio"] {
+  accent-color: var(--brand);
+}
+
+/* A filter checkbox was inheriting the 160px text-input sizing, which
+   pushed its label far away ("warnings only" floating mid-bar). */
+.filters label.toggle input[type="checkbox"] {
+  min-width: 0;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  margin: 0;
+}
+
+.filters {
+  border-color: #e6ecfa;
+  border-radius: var(--radius-lg);
+  box-shadow: var(--card-shadow);
+}
+
+/* ---- status lives in toasts only (nothing is written to the header) ---- */
+.brand,
+.brand > span {
+  white-space: nowrap;
+}
+
+/* Toasts sit just under the top bar so they never cover its buttons. */
+#toast-stack {
+  top: 72px;
+}
+
+.toast {
+  border-radius: var(--radius-lg);
+  /* not border-color: that would wipe the coloured left stripe */
+  border-top-color: #e6ecfa;
+  border-right-color: #e6ecfa;
+  border-bottom-color: #e6ecfa;
+  box-shadow: 0 8px 28px rgba(0, 27, 148, 0.16);
+}
+
+.toast-busy .toast-icon {
+  display: inline-block;
+  color: var(--brand);
+  animation: toast-spin 1s linear infinite;
+}
+
+@keyframes toast-spin {
+  to { transform: rotate(360deg); }
+}

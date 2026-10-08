@@ -816,6 +816,21 @@ def read_p2f_nominations(
     return out
 
 
+def read_p2f_exclusions(
+    overrides: OverrideRows,
+    name_to_id: dict[str, str] | None = None,
+) -> set[str]:
+    """Read ``type=p2f_exclude`` rows: employee_ids (or names, when no
+    map is given) who must NOT act as a P2F handler today."""
+    from ..schemas import OverrideType
+    out: set[str] = set()
+    for row in _rows_of_type(overrides, OverrideType.P2F_EXCLUDE.value):
+        name = _row_employee_name(row)
+        if name:
+            out.add(_resolve_name_to_id(name, name_to_id))
+    return out
+
+
 def read_per_staff_overrides(
     overrides: OverrideRows, d_day: date_type,
     name_to_id: dict[str, str] | None = None,

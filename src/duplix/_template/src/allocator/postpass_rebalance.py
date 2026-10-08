@@ -78,6 +78,7 @@ def apply_rebalance_pass(
     d_day: date_t,
     target_spread: int = 1,
     max_transfers_per_bucket: int = 40,
+    extra_handler_ids: "frozenset[str] | set[str] | tuple[str, ...]" = (),
 ) -> tuple[list[AllocationRow], RebalanceSummary]:
     """Level workload within each (shift, role) bucket by transferring
     flights from the most- to the least-loaded staff. Returns updated
@@ -116,7 +117,7 @@ def apply_rebalance_pass(
         if f_ref is not None:
             staff_stds[st["staff_id"]].append(spacing_key(f_ref, d_day))
 
-    excluded_handlers = set(p2f_handlers.values())
+    excluded_handlers = set(p2f_handlers.values()) | set(extra_handler_ids)
     buckets: dict[tuple[ShiftCode, Role], list[StaffMember]] = defaultdict(list)
     for s in staff_today:
         if s.shift_today is None or s.role == Role.AM:

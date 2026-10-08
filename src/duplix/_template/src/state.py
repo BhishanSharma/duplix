@@ -170,6 +170,11 @@ class AppState:
     unallocated: list[dict[str, Any]] = field(default_factory=list)
     recommendations: dict[str, Any] = field(default_factory=dict)
 
+    # True from a Plan until the next Allocate stores its result: the
+    # allocation held in memory (if any) no longer matches the freshly
+    # planned flights/roster, so it must not be offered for download.
+    allocation_stale: bool = False
+
     # ---- run status ----
     last_run: str = ""
     mode: str = ""
@@ -438,6 +443,7 @@ class AppState:
             self.unallocated = []
             self.recommendations = {}
             self.prev_staff_by_key = {}
+            self.allocation_stale = False
             self.last_run = ""
             self.mode = ""
             self.solver_status = ""

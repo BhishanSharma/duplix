@@ -896,7 +896,7 @@ def solve_allocation(
     # min down and force everyone else under their target.
     excluded_handlers: set[str] = set()
     if elig_ctx is not None:
-        excluded_handlers = set(elig_ctx.p2f_handler_by_shift.values())
+        excluded_handlers = elig_ctx.all_p2f_handler_ids
     spread_groups: dict[tuple[str, Role], list[StaffMember]] = defaultdict(list)
     for s in staff:
         if s.shift_today is None or s.role == Role.AM:
@@ -1082,9 +1082,7 @@ def solve_allocation(
     # shift (W215 warning surfaces this need).
     p2f_cap_per_handler = 8
     if elig_ctx is not None:
-        p2f_handler_set_for_cap = set(
-            elig_ctx.p2f_handler_by_shift.values()
-        )
+        p2f_handler_set_for_cap = elig_ctx.all_p2f_handler_ids
         for emp_id in p2f_handler_set_for_cap:
             p2f_vars = [
                 x[(f.unique_id, emp_id)]
@@ -1131,7 +1129,7 @@ def solve_allocation(
         reserved_p2f, skipped_p2f = select_p2f_priority(
             flights,
             eligibility,
-            set(elig_ctx.p2f_handler_by_shift.values()),
+            elig_ctx.all_p2f_handler_ids,
             ops_day=ops_day,
             cap_by_staff={
                 eid: hard_cap_for(s) for eid, s in staff_by_id.items()

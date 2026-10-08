@@ -5,7 +5,10 @@
   --text: #1f2328;
   --subdued: #57606a;
   --line: #d0d7de;
-  --primary: #0d4f9e;
+  /* IndiGo-style deep blue — the one brand colour. Drives primary
+     buttons, the active tab and the top accent bar. */
+  --brand: #001b94;
+  --primary: var(--brand);
   --primary-text: #ffffff;
   --warn: #c08400;
   --warn-bg: #fff8c5;

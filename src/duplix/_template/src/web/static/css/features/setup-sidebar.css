@@ -86,6 +86,26 @@
 }
 .drawer-section-head .subdued { font-size: 12px; }
 
+/* ---- shift timings: shift rows x start / end / length ---- */
+.shift-times-grid { flex-basis: 100%; }
+.shift-times-table {
+  border-collapse: collapse;
+  font-size: 12px;
+}
+.shift-times-table th {
+  padding: 4px 12px 4px 0;
+  text-align: left;
+  font-weight: 600;
+}
+.shift-times-table thead th { color: var(--subdued); }
+.shift-times-table td { padding: 3px 12px 3px 0; }
+.shift-times-table .shift-length { white-space: nowrap; }
+.drawer-section .shift-times-table input[type="text"] {
+  width: 64px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
 /* ---- max flights per staff: shift rows x role columns ---- */
 .hard-caps-grid { flex-basis: 100%; }
 .hard-caps-table {
@@ -164,4 +184,75 @@
 .intl-chip-remove:disabled {
   opacity: 0.5;
   cursor: progress;
+}
+
+
+/* ---- collapsible sections (Google-Sheets-style side panel) ----
+   One <details> row per section: chevron + title on the left, the
+   current value on the right, content below when open. */
+#setup-sidebar .drawer-body { gap: 0; }
+
+.setup-acc,
+.setup-acc.drawer-section {
+  margin: 0;
+  padding: 0;
+  border-top: 0;
+  border-bottom: 1px solid var(--line);
+}
+.setup-acc:last-child { border-bottom: 0; }
+
+.setup-acc > summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 6px;
+  cursor: pointer;
+  list-style: none;            /* Firefox */
+  user-select: none;
+  border-radius: var(--radius);
+}
+.setup-acc > summary::-webkit-details-marker { display: none; }   /* Safari/Chrome */
+.setup-acc > summary:hover { background: var(--hover); }
+.setup-acc > summary:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: -2px;
+}
+.setup-acc > summary h3 {
+  flex: 1;
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  text-transform: none;
+  letter-spacing: 0;
+  color: var(--text);
+}
+.setup-acc > summary > :not(h3):not(.acc-chevron) {
+  margin-left: auto;
+  font-size: 12px;
+  text-align: right;
+}
+.acc-chevron {
+  flex: none;
+  width: 18px;
+  height: 18px;
+  color: var(--subdued);
+  transition: transform 0.15s ease;
+}
+.setup-acc[open] > summary .acc-chevron { transform: rotate(90deg); }
+
+.acc-body {
+  padding: 2px 6px 16px 26px;   /* indented under the title, past the chevron */
+}
+.acc-body > p:first-child { margin-top: 0; }
+.setup-acc .acc-body form { margin-top: 10px; }
+
+@media (prefers-reduced-motion: reduce) {
+  .acc-chevron { transition: none; }
+}
+/* the roster body reuses .setup-section, whose :last-child rule would
+   strip the bottom padding and border — keep the row's own spacing */
+.acc-body.setup-section,
+.acc-body.setup-section:last-child {
+  padding-bottom: 16px;
+  border-bottom: 0;
 }

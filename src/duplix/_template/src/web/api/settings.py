@@ -1,9 +1,10 @@
 """Drawer settings that write through past the session.
 
 Shift limits are per-iteration and cleared by Reset. The airport-code,
-break-length and extraction-filter edits go into ``configs/config.yml``, and
-the per-staff flight caps into ``configs/shift_limits.json``, so they
-outlive the process and the engine sees them on the next run.
+break-length and extraction-filter edits go into ``configs/config.yml``, the
+per-staff flight caps into ``configs/shift_limits.json`` and the shift
+timings into ``configs/shift_times.json``, so they outlive the process and
+the engine sees them on the next run.
 """
 
 from __future__ import annotations
@@ -85,6 +86,48 @@ def register(router: Router) -> None:
         except ValueError as exc:
             return bad_request(str(exc))
         return json_response(_break_payload(minutes))
+
+    def _shift_times_payload() -> dict[str, object]:
+        from ...allocator import shift_hours, windows
+        live = windows.SHIFT_NOMINAL_MIN
+        shipped = windows.shipped_shift_hours()
+        return {
+            "shifts": shift_hours.to_clock(live),
+            "defaults": shift_hours.to_clock(shipped),
+            "windows_min": {s: list(live[s]) for s in shift_hours.SHIFTS},
+            "customised": dict(live) != dict(shipped),
+        }
+
+    @router.get("/api/shift_times")
+    def get_shift_times(_req: Request) -> Response:
+        """Setup sidebar "Shift timings" — each shift's nominal start and
+        end as the engine is using them now, plus the shipped hours."""
+        return json_response(_shift_times_payload())
+
+    @router.post("/api/shift_times")
+    def set_shift_times(req: Request) -> Response:
+        """Saves the shift hours to configs/shift_times.json and applies
+        them in place. Refused while a run is in flight, since the engine
+        reads the hours all the way through one."""
+        if runner.is_running():
+            return conflict({"error": "a run is in progress — wait for it to finish"})
+        from ...allocator import shift_hours, windows
+        try:
+            hours = shift_hours.save(req.json().get("shifts"))
+        except ValueError as exc:
+            return bad_request(str(exc))
+        windows.apply_shift_hours(hours)
+        return json_response(_shift_times_payload())
+
+    @router.post("/api/shift_times/reset")
+    def reset_shift_times(_req: Request) -> Response:
+        """Drops the saved hours; the shipped ones apply again."""
+        if runner.is_running():
+            return conflict({"error": "a run is in progress — wait for it to finish"})
+        from ...allocator import shift_hours, windows
+        shift_hours.clear()
+        windows.apply_shift_hours(windows.shipped_shift_hours())
+        return json_response(_shift_times_payload())
 
     def _caps_payload() -> dict[str, object]:
         from ...allocator import caps as _caps

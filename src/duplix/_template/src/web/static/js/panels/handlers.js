@@ -1,7 +1,9 @@
 /* Nominated handlers — the P2F slot per shift.
  *
  * P2F handlers are auto-picked from STAFF roster cells marked M/P2F,
- * A/P2F, N/P2F, topped up by type=p2f override rows.
+ * A/P2F, N/P2F, topped up by type=p2f override rows. A shift with
+ * neither is auto-filled from a STAFF member on that shift whose roster
+ * licence really says P2F; if nobody qualifies it stays empty.
  *
  * This is also the Allocate gate: a nomination only counts if the
  * named person is actually on that shift TODAY (the same check the
@@ -20,11 +22,12 @@ const P2F_SHIFTS = ["M", "A", "N"];
 export const template = `
   <div class="block" id="handlers-block" hidden>
     <h2>P2F handlers required today — <span id="handlers-date">—</span></h2>
-    <p class="subdued">P2F handlers are auto-picked from STAFF roster cells
-      marked <code>M/P2F</code>, <code>A/P2F</code>, <code>N/P2F</code>, or
-      nominated via the <strong>Handler Assign</strong> panel — one handler
-      per 8 P2F flights in a shift. <strong>Allocate stays disabled</strong>
-      until every shift below is covered.</p>
+    <p class="subdued">One handler is needed per 8 P2F flights in a shift.
+      Handlers come from roster cells (<code>M/P2F</code>, <code>A/P2F</code>,
+      <code>N/P2F</code>) and the <strong>Handler Assign</strong> panel; any
+      shortfall is auto-filled from P2F-licensed staff on that shift.
+      <strong>Allocate stays disabled</strong> until every shift below is
+      covered.</p>
     <div class="stat-grid" id="handlers-grid"></div>
     <div id="handlers-issues"></div>
   </div>`;
@@ -83,11 +86,14 @@ function shiftCard(shift, h) {
           <span class="subdued">needs ${required - have} more</span></div>
       </div>`;
   }
+  const auto = (h.p2f || []).some(
+    (p) => p.shift === shift && p.source === "licence_auto");
   return `
     <div class="stat-card handler-card">
       <div class="stat-value">${names.join(", ") || `${have} of ${required}`}</div>
       <div class="stat-label">P2F handler — <code>${escapeHTML(shift)}</code>
-        <span class="subdued">(${have} of ${required} needed)</span></div>
+        <span class="subdued">(${have} of ${required} needed${auto
+          ? " · incl. auto-filled from P2F licence" : ""})</span></div>
     </div>`;
 }
 

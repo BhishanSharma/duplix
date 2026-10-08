@@ -33,7 +33,7 @@ function dismiss(el) {
 
 /** Show a toast. kind: "error" | "warn" | "ok" | "info" (default "info").
  *  Returns the element, mainly so callers/tests can dismiss it early. */
-export function show(message, kind = "info") {
+export function show(message, kind = "info", { sticky = false } = {}) {
   const stack = $("#toast-stack");
   if (!stack) return null;
 
@@ -58,8 +58,31 @@ export function show(message, kind = "info") {
     dismiss(el);
   });
 
-  start();
+  if (!sticky) start();
   return el;
+}
+
+/* One long-lived "working…" toast for the run in flight. Calling busy()
+ * again just updates its text, so polling never stacks duplicates;
+ * clearBusy() removes it when the run settles. */
+let busyEl = null;
+
+export function busy(message) {
+  if (busyEl && busyEl.isConnected && !busyEl.dataset.leaving) {
+    busyEl.querySelector(".toast-message").textContent = message;
+    return busyEl;
+  }
+  busyEl = show(message, "info", { sticky: true });
+  if (busyEl) {
+    busyEl.classList.add("toast-busy");
+    busyEl.querySelector(".toast-icon").innerHTML = "&#8635;";   // ↻
+  }
+  return busyEl;
+}
+
+export function clearBusy() {
+  if (busyEl) dismiss(busyEl);
+  busyEl = null;
 }
 
 export const error = (message) => show(message, "error");

@@ -378,6 +378,9 @@ class OverrideType(StrEnum):
     """
     # Handler nominations (engine reads at solve time)
     P2F                = "p2f"
+    # "Not doing P2F today": keeps a person out of the P2F handler role
+    # (roster-cell pick, licence auto-fill and manual nomination alike).
+    P2F_EXCLUDE        = "p2f_exclude"
     # Per-staff constraints (read at solve time)
     SICK               = "sick"
     CHANGE_ROLE        = "change_role"
@@ -402,6 +405,7 @@ class OverrideType(StrEnum):
 # excluded here.
 OVERRIDE_TYPES_FOR_UI: tuple[OverrideType, ...] = (
     OverrideType.P2F,
+    OverrideType.P2F_EXCLUDE,
     OverrideType.SICK,
     OverrideType.CHANGE_ROLE,
     OverrideType.CHANGE_SHIFT,
@@ -420,6 +424,7 @@ STAGED_FORM_OVERRIDE_TYPES: tuple[OverrideType, ...] = (
     OverrideType.REMOVE_STAFF,
     OverrideType.CHANGE_SHIFT,
     OverrideType.P2F,
+    OverrideType.P2F_EXCLUDE,
 )
 
 
@@ -442,6 +447,7 @@ STAGED_FORM_OVERRIDE_TYPES: tuple[OverrideType, ...] = (
 OVERRIDE_TYPE_RELEVANT_COLS: dict[OverrideType, tuple[str, ...]] = {
     # ----- User-facing (handler nominations + per-staff) -----
     OverrideType.P2F:               ("type", "employee", "shift"),
+    OverrideType.P2F_EXCLUDE:       ("type", "employee"),
     OverrideType.SICK:              ("type", "employee"),
     # change_role: the "shift" column carries the new ROLE
     # (STAFF / ZC / AM), not a shift code — the frontend swaps the

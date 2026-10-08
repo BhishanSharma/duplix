@@ -143,6 +143,8 @@ python -m pytest
   independent H1 / H10 / H16 checker you can run on any finished
   allocation: `check_allocation(rows, ops_day=D, caps={emp_id: cap})`.
 * `tests/test_config_files.py` validates `config.yml` and `shift_limits.json`.
+* `tests/test_shift_hours.py` covers the editable shift timings: validation,
+  the save file, and that every dependent window table moves with them.
 
 ## Layout
 
@@ -179,11 +181,13 @@ src/
       js/charts/            one module per dashboard chart
       js/panels/            dashboard blocks with their own load cycle
       js/drawer/            the Override drawer and its sections
-      js/sidebar/           the Setup sidebar (the set-once roster files)
+      js/sidebar/           the Setup sidebar (roster files, shift timings, caps)
       css/                  partials, listed in styles.css
 configs/
   config.yml                column maps, status aliases, solver knobs
   shift_limits.json         per-(shift, role) preferred / acceptable / cap
+  shift_times.json          shift start / end changed from the Setup sidebar
+                            (absent = the hours shipped in allocator/windows.py)
 ```
 
 ```stdlib http.server web UI.
@@ -216,6 +220,9 @@ Routes (JSON unless noted):
     GET  /api/staffing              staffing recommendation
     GET  /api/staff_names           roster names for the drawer dropdowns
     GET  /api/shift_limits          current (shift, role) bands
+    GET  /api/shift_times           each shift's start / end in use, plus the shipped ones
+    POST /api/shift_times           {shifts: {M: {start, end}, …}} — save and apply
+    POST /api/shift_times/reset     back to the shipped hours
 
     GET  /api/overrides             override rows
     POST /api/overrides             append one {values: [...]}
