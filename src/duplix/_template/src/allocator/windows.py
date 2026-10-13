@@ -1,4 +1,4 @@
-"""Shift-window tables and time helpers for Step 4.
+"""Shift-window tables and time helpers used throughout Allocate.
 
 The numbers below are the single source of truth for H7 (tail extensions),
 H9 (ZC report buffers), H10 (15-min spacing, 30 min domestic→INTL and
@@ -256,9 +256,6 @@ def in_p2f_block(std_min: int, p2f_std_mins: Iterable[int]) -> bool:
         for p in p2f_std_mins
     )
 
-# International ±60 min from shift start/end (H12, correction r2-3).
-INTL_SHIFT_EDGE_MIN = 60
-
 
 # ---------- time-arithmetic helpers ----------
 
@@ -330,23 +327,6 @@ def is_in_tail_ext(
     nominal_end = SHIFT_NOMINAL_MIN[shift][1]
     tail_end = SHIFT_TAIL_END_MIN[shift]
     return nominal_end < minutes <= tail_end
-
-
-def is_within_intl_shift_edge(
-    std: time_t, flight_date: date_t, ops_day: date_t, shift: ShiftCode,
-) -> bool:
-    """H12 (correction r2-3): for international flights, exclude staff
-    whose STD is within 60 min of their shift's nominal start or end.
-
-    Strict-less-than / strict-greater-than per the correction's literal
-    wording: STD < shift_start + 60min OR STD > shift_end - 60min.
-
-    Retired 2026-05-12 (F9 dropped in eligibility.py). Kept here for
-    history / tests; not called by the live pipeline.
-    """
-    minutes = std_to_ops_day_minutes(std, flight_date, ops_day)
-    start, end = SHIFT_NOMINAL_MIN[shift]
-    return minutes < start + INTL_SHIFT_EDGE_MIN or minutes > end - INTL_SHIFT_EDGE_MIN
 
 
 def is_in_std_window(

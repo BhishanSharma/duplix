@@ -28,7 +28,7 @@ from datetime import date as date_t
 from datetime import datetime, timedelta
 from typing import Any
 
-from . import roster_store
+from .storage import roster_store
 from .schemas import (
     AllocationRow,
     AvailabilityRow,
@@ -420,7 +420,8 @@ class AppState:
 
     def reset_results(self) -> dict[str, int]:
         """Clear every engine output but keep the uploads and the
-        override rows. This is what the Reset button does."""
+        override rows. The Reset button calls this and then also drops
+        the day's flight schedule (``web/api/runs.py``)."""
         with self.lock:
             cleared = {
                 "cleaned": sum(len(v) for v in self.cleaned.values()),

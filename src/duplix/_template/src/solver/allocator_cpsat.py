@@ -1,4 +1,4 @@
-"""CP-SAT model for Step 4 — flight allocation.
+"""CP-SAT model for Allocate — flight allocation.
 
 Hard constraints (always enforced):
   H1   exactly one staff per flight       — Σ x[f, e] = 1
@@ -29,7 +29,9 @@ over the eligibility matrix. With ~2000 flights × ~95 staff but only
 than ~190k. CP-SAT handled this comfortably under a 60s time budget on
 the original sample day per D5; the equity objective added since (S1b
 bucket-spread) is considerably harder to prove optimal on a full
-production day, which is why ``configs/config.yml`` budgets up to 700s.
+production day. Since 2026-10-10 the model is built in seconds (clique
+H10, indexed objective terms) and starts from a complete greedy hint,
+so ``configs/config.yml`` budgets 15s.
 
 2026-09-26 (speed pass, no change to what counts as an acceptable
 answer): every cold solve — first Plan/Allocate of the day, with no
@@ -44,6 +46,7 @@ wall-clock levers: same ``max_seconds``, same 0%-gap requirement.
 from __future__ import annotations
 
 import os
+from bisect import bisect_right
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date as date_t
@@ -58,7 +61,10 @@ from ..allocator.p2f_priority import select_p2f_priority
 from ..allocator.windows import (
     HANDOVER_WINDOW_MIN,
     SHIFT_NOMINAL_MIN,
+    SPACING_DOM_TO_INTL_MIN,
+    SPACING_HARD_MIN,
     SPACING_MAX_MIN,
+    SPACING_P2F_PAIR_MIN,
     ZC_BUFFER_END_MIN,
     ZC_BUFFER_START_MIN,
     awkward_eligible_shifts,
@@ -265,11 +271,60 @@ _STATUS_MAP: dict[Any, str] = {
 }
 
 
+@dataclass
+class _Index:
+    """Lookups built ONCE per solve over the sparse ``x`` dict.
+
+    Every objective term used to walk ``flights x staff`` and call
+    ``FlightInput.unique_id`` (a string-building property) inside the
+    double loop — ~25M calls, ~1.5 minutes of pure Python on a 2,100-
+    flight day before CP-SAT even started. Iterating these per-staff /
+    per-flight lists touches only the ~180k eligible pairs.
+    """
+
+    flight_by_uid: dict[str, FlightInput]
+    staff_by_id: dict[str, StaffMember]
+    std_min: dict[str, int]
+    by_staff: dict[str, list[tuple[str, Any]]]
+    by_flight: dict[str, list[tuple[str, Any]]]
+
+    @classmethod
+    def build(
+        cls,
+        flights: list[FlightInput],
+        staff: list[StaffMember],
+        x: dict[tuple[str, str], Any],
+        ops_day: date_t,
+    ) -> "_Index":
+        flight_by_uid = {f.unique_id: f for f in flights}
+        by_staff: dict[str, list[tuple[str, Any]]] = defaultdict(list)
+        by_flight: dict[str, list[tuple[str, Any]]] = defaultdict(list)
+        for (uid, eid), v in x.items():
+            by_staff[eid].append((uid, v))
+            by_flight[uid].append((eid, v))
+        return cls(
+            flight_by_uid=flight_by_uid,
+            staff_by_id={s.employee_id: s for s in staff},
+            std_min={
+                uid: std_to_ops_day_minutes(f.std, f.date, ops_day)
+                for uid, f in flight_by_uid.items()
+            },
+            by_staff=by_staff,
+            by_flight=by_flight,
+        )
+
+    def staff_vars(self, eid: str) -> list[Any]:
+        return [v for _uid, v in self.by_staff.get(eid, ())]
+
+
+def _flying(s: StaffMember | None) -> bool:
+    return s is not None and s.shift_today is not None and s.role != Role.AM
+
+
 def _build_s1_term(
     model: cp_model.CpModel,
-    flights: list[FlightInput],
+    idx: _Index,
     staff: list[StaffMember],
-    x: dict[tuple[str, str], Any],
     day_level_by_bucket: dict[tuple[str, Role], int] | None = None,
 ) -> Any:
     """S1 — per-staff distance from the day's workload level.
@@ -307,10 +362,7 @@ def _build_s1_term(
     for s in staff:
         if s.shift_today is None or s.role == Role.AM:
             continue
-        my_vars = [
-            x[(f.unique_id, s.employee_id)]
-            for f in flights if (f.unique_id, s.employee_id) in x
-        ]
+        my_vars = idx.staff_vars(s.employee_id)
         if not my_vars:
             continue
         level = day_level_by_bucket.get((s.shift_today, s.role))
@@ -340,64 +392,64 @@ def _build_s1_term(
     return sum(terms) if terms else 0
 
 
+def _wsum(pairs: list[tuple[Any, int]]) -> Any:
+    """``sum(coeff * var)`` as one flat LinearExpr (Python ``sum`` over
+    hundreds of thousands of products builds a deep expression tree)."""
+    if not pairs:
+        return 0
+    return cp_model.LinearExpr.weighted_sum(
+        [v for v, _c in pairs], [c for _v, c in pairs],
+    )
+
+
 def _build_s3_term(
     model: cp_model.CpModel,
-    flights: list[FlightInput],
+    idx: _Index,
     staff: list[StaffMember],
-    x: dict[tuple[str, str], Any],
 ) -> Any:
     """S3 heavy-flight spread. Penalize the MAX heavy-count across
     staff, so piling all PAX≥200 flights on one person is more
     expensive than spreading them. Weight is mild (5) — sways ties
     only.
     """
-    heavy_flights = [f for f in flights if f.load >= S3_HEAVY_THRESHOLD_PAX]
-    if not heavy_flights:
+    heavy = {
+        uid for uid, f in idx.flight_by_uid.items()
+        if f.load >= S3_HEAVY_THRESHOLD_PAX
+    }
+    if not heavy:
         return 0
-    max_heavy = model.new_int_var(0, len(heavy_flights), "s3_max_heavy")
+    max_heavy = model.new_int_var(0, len(heavy), "s3_max_heavy")
     for s in staff:
-        if s.shift_today is None or s.role == Role.AM:
+        if not _flying(s):
             continue
         my_heavies = [
-            x[(f.unique_id, s.employee_id)] for f in heavy_flights
-            if (f.unique_id, s.employee_id) in x
+            v for uid, v in idx.by_staff.get(s.employee_id, ()) if uid in heavy
         ]
         if my_heavies:
             model.add(max_heavy >= sum(my_heavies))
     return S3_WEIGHT_MAX_HEAVY * max_heavy
 
 
-def _build_s4_term(
-    flights: list[FlightInput],
-    staff: list[StaffMember],
-    x: dict[tuple[str, str], Any],
-) -> Any:
+def _build_s4_term(idx: _Index, staff: list[StaffMember]) -> Any:
     """S4 pairing stability — make solutions deterministic by adding
     a tiny per-assignment cost proportional to the staff's position
     in the (row-ordered) input list. Solver prefers lower-row staff
-    in ties; weight 1 ensures S4 never overrides S1 or S3.
+    in ties.
 
     Caller is responsible for passing ``staff`` in IN_Staff row order.
     """
-    terms: list[Any] = []
-    for idx, s in enumerate(staff):
-        if s.shift_today is None or s.role == Role.AM:
+    pairs: list[tuple[Any, int]] = []
+    for row, s in enumerate(staff):
+        if not _flying(s) or row == 0:
             continue
-        my_vars = [
-            x[(f.unique_id, s.employee_id)] for f in flights
-            if (f.unique_id, s.employee_id) in x
-        ]
-        if my_vars and idx > 0:
-            terms.append(S4_WEIGHT_PER_ROW * idx * sum(my_vars))
-    return sum(terms) if terms else 0
+        pairs.extend(
+            (v, S4_WEIGHT_PER_ROW * row)
+            for _uid, v in idx.by_staff.get(s.employee_id, ())
+        )
+    return _wsum(pairs)
 
 
-def _build_s5_handover_term(
-    flights: list[FlightInput],
-    staff: list[StaffMember],
-    x: dict[tuple[str, str], Any],
-    ops_day: date_t,
-) -> Any:
+def _build_s5_handover_term(idx: _Index) -> Any:
     """S5 handover-window distribution preference (round-3).
 
     For each flight whose STD falls in the (nominal_end, nominal_end +
@@ -407,44 +459,34 @@ def _build_s5_handover_term(
     creates a default of "handover stays with prev shift unless S1
     count balance prefers otherwise."
     """
-    terms: list[Any] = []
-    for f in flights:
-        std_min = std_to_ops_day_minutes(f.std, f.date, ops_day)
-        # Identify all shifts whose handover-overlap window contains
-        # this STD. (A flight in the M→A handover overlap is in BOTH M's
-        # tail AND A's nominal — we want to penalize the A side.)
-        for shift, (_, nominal_end) in SHIFT_NOMINAL_MIN.items():
-            if nominal_end < std_min <= nominal_end + HANDOVER_WINDOW_MIN:
-                # `shift` is the prev shift. Penalize assignments to any
-                # staff whose shift is NOT `shift` — they're the "next
-                # shift" for this STD.
-                for s in staff:
-                    if s.shift_today is None or s.role == Role.AM:
-                        continue
-                    if s.shift_today == shift:
-                        continue
-                    if (f.unique_id, s.employee_id) in x:
-                        terms.append(
-                            S5_WEIGHT_HANDOVER_NEXT_SHIFT
-                            * x[(f.unique_id, s.employee_id)]
-                        )
-    return sum(terms) if terms else 0
+    pairs: list[tuple[Any, int]] = []
+    for uid, cands in idx.by_flight.items():
+        std_min = idx.std_min[uid]
+        # Shifts whose handover overlap contains this STD. (A flight in
+        # the M→A overlap is in BOTH M's tail AND A's nominal — we want
+        # to penalize the A side.)
+        prev_shifts = [
+            shift for shift, (_, nominal_end) in SHIFT_NOMINAL_MIN.items()
+            if nominal_end < std_min <= nominal_end + HANDOVER_WINDOW_MIN
+        ]
+        for shift in prev_shifts:
+            for eid, v in cands:
+                s = idx.staff_by_id.get(eid)
+                if _flying(s) and s.shift_today != shift:
+                    pairs.append((v, S5_WEIGHT_HANDOVER_NEXT_SHIFT))
+    return _wsum(pairs)
 
 
-def _build_s6_awkward_term(
-    flights: list[FlightInput],
-    staff: list[StaffMember],
-    x: dict[tuple[str, str], Any],
-    ops_day: date_t,
-) -> Any:
+def _build_s6_awkward_term(idx: _Index, ops_day: date_t) -> Any:
     """S6 awkward-window routing preference (round-3).
 
     Replaces H15 hard routing. For each flight in an awkward window,
     assignments to non-preferred shifts cost extra. The "preferred" shift
     is the first entry in the awkward_eligible_shifts tuple.
     """
-    terms: list[Any] = []
-    for f in flights:
+    pairs: list[tuple[Any, int]] = []
+    for uid, cands in idx.by_flight.items():
+        f = idx.flight_by_uid[uid]
         awk = (
             f.awkward_eligible_shifts if f.is_awkward_window else
             awkward_eligible_shifts(f.std, f.date, ops_day)
@@ -452,55 +494,34 @@ def _build_s6_awkward_term(
         if not awk:
             continue
         preferred_shift = awk[0]
-        for s in staff:
-            if s.shift_today is None or s.role == Role.AM:
-                continue
-            if s.shift_today == preferred_shift:
-                continue
-            if (f.unique_id, s.employee_id) in x:
-                terms.append(
-                    S6_WEIGHT_AWKWARD_NON_PREFERRED * x[(f.unique_id, s.employee_id)]
-                )
-    return sum(terms) if terms else 0
+        for eid, v in cands:
+            s = idx.staff_by_id.get(eid)
+            if _flying(s) and s.shift_today != preferred_shift:
+                pairs.append((v, S6_WEIGHT_AWKWARD_NON_PREFERRED))
+    return _wsum(pairs)
 
 
-def _build_s7_zc_buffer_term(
-    flights: list[FlightInput],
-    staff: list[StaffMember],
-    x: dict[tuple[str, str], Any],
-    ops_day: date_t,
-) -> Any:
+def _build_s7_zc_buffer_term(idx: _Index, staff: list[StaffMember]) -> Any:
     """S7 ZC report-buffer avoidance (round-3).
 
     Replaces H9 hard exclusion. ZC assignments inside their report
     buffers cost S7 per flight; non-buffer ZC assignments are free.
     """
-    terms: list[Any] = []
+    pairs: list[tuple[Any, int]] = []
     for s in staff:
         if s.role != Role.ZC or s.shift_today is None:
             continue
         b1_start, b1_end = ZC_BUFFER_START_MIN[s.shift_today]
         b2_start, b2_end = ZC_BUFFER_END_MIN[s.shift_today]
-        for f in flights:
-            if (f.unique_id, s.employee_id) not in x:
-                continue
-            std_min = std_to_ops_day_minutes(f.std, f.date, ops_day)
-            in_buffer = (
-                (b1_start <= std_min < b1_end)
-                or (b2_start <= std_min < b2_end)
-            )
-            if in_buffer:
-                terms.append(
-                    S7_WEIGHT_ZC_BUFFER * x[(f.unique_id, s.employee_id)]
-                )
-    return sum(terms) if terms else 0
+        for uid, v in idx.by_staff.get(s.employee_id, ()):
+            std_min = idx.std_min[uid]
+            if (b1_start <= std_min < b1_end) or (b2_start <= std_min < b2_end):
+                pairs.append((v, S7_WEIGHT_ZC_BUFFER))
+    return _wsum(pairs)
 
 
 def _build_outer_band_term(
-    flights: list[FlightInput],
-    staff: list[StaffMember],
-    x: dict[tuple[str, str], Any],
-    ops_day: date_t,
+    idx: _Index, staff: list[StaffMember], ops_day: date_t,
 ) -> Any:
     """S_outer A/A1 outer-band penalty (user 2026-05-12, §1).
 
@@ -511,30 +532,18 @@ def _build_outer_band_term(
     ``is_in_std_outer_band`` so they contribute zero terms.
     """
     from ..allocator.windows import is_in_std_outer_band
-    terms: list[Any] = []
+    pairs: list[tuple[Any, int]] = []
     for s in staff:
-        if s.shift_today is None or s.role == Role.AM:
+        if not _flying(s) or s.shift_today not in ("A", "A1"):
             continue
-        if s.shift_today not in ("A", "A1"):
-            continue
-        for f in flights:
-            if (f.unique_id, s.employee_id) not in x:
-                continue
+        for uid, v in idx.by_staff.get(s.employee_id, ()):
+            f = idx.flight_by_uid[uid]
             if is_in_std_outer_band(f.std, f.date, ops_day, s.shift_today):
-                terms.append(
-                    S_OUTER_BAND_PENALTY * x[(f.unique_id, s.employee_id)]
-                )
-    return sum(terms) if terms else 0
+                pairs.append((v, S_OUTER_BAND_PENALTY))
+    return _wsum(pairs)
 
 
-def _build_s_intl_spacing_term(
-    model: cp_model.CpModel,
-    flights: list[FlightInput],
-    staff: list[StaffMember],
-    x: dict[tuple[str, str], Any],
-    eligibility: dict[str, set[str]],
-    ops_day: date_t,
-) -> Any:
+def _build_s_intl_spacing_term(model: cp_model.CpModel, idx: _Index) -> Any:
     """Phase 4 / Change 5 — soft penalty for same-handler INTL DEP pairs
     in the 15-30 min spacing band.
 
@@ -549,83 +558,58 @@ def _build_s_intl_spacing_term(
 
     Gaps < 15 are already forbidden by H10 (SPACING_HARD_MIN).
     Gaps ≥ 30 are the preferred state and receive no penalty.
-    Staff on shifts outside ``S_INTL_SPACING_SHIFTS`` are skipped — though
-    today the set covers every shift, so this is a no-op filter.
     """
-    intl_flights = [f for f in flights if f.is_international]
-    if len(intl_flights) < 2:
-        return 0
-    intl_flights.sort(
-        key=lambda f: std_to_ops_day_minutes(f.std, f.date, ops_day)
-    )
-    staff_by_id = {s.employee_id: s for s in staff}
-    terms: list[Any] = []
-    n = len(intl_flights)
-    for i in range(n):
-        fi = intl_flights[i]
-        std_i = std_to_ops_day_minutes(fi.std, fi.date, ops_day)
-        elig_i = eligibility.get(fi.unique_id, set())
-        for j in range(i + 1, n):
-            fj = intl_flights[j]
-            std_j = std_to_ops_day_minutes(fj.std, fj.date, ops_day)
-            gap = std_j - std_i
-            if gap < H_INTL_SPACING_HARD_MIN:
-                continue  # H10 forbids; no soft term needed
-            if gap >= 30:
-                break  # subsequent j's are even further out — done
-            weight = (
-                S_INTL_SPACING_HEAVY if gap <= 20 else S_INTL_SPACING_LIGHT
-            )
-            elig_j = eligibility.get(fj.unique_id, set())
-            common = elig_i & elig_j
-            for eid in common:
-                s = staff_by_id.get(eid)
-                if s is None or s.shift_today not in S_INTL_SPACING_SHIFTS:
-                    continue
-                xi = x.get((fi.unique_id, eid))
-                xj = x.get((fj.unique_id, eid))
-                if xi is None or xj is None:
-                    continue
-                both = model.new_bool_var(
-                    f"intl_both_{fi.unique_id}_{fj.unique_id}_{eid}"
+    pairs: list[tuple[Any, int]] = []
+    for eid, my in idx.by_staff.items():
+        s = idx.staff_by_id.get(eid)
+        if s is None or s.shift_today not in S_INTL_SPACING_SHIFTS:
+            continue
+        intl = sorted(
+            (
+                (idx.std_min[uid], uid, v) for uid, v in my
+                if idx.flight_by_uid[uid].is_international
+            ),
+            key=lambda t: t[0],
+        )
+        for i, (std_i, uid_i, xi) in enumerate(intl):
+            for std_j, uid_j, xj in intl[i + 1:]:
+                gap = std_j - std_i
+                if gap < H_INTL_SPACING_HARD_MIN:
+                    continue  # H10 forbids; no soft term needed
+                if gap >= 30:
+                    break
+                weight = (
+                    S_INTL_SPACING_HEAVY if gap <= 20 else S_INTL_SPACING_LIGHT
                 )
-                # both == xi AND xj
-                model.add(both <= xi)
-                model.add(both <= xj)
-                model.add(both >= xi + xj - 1)
-                terms.append(weight * both)
-    if not terms:
+                # Minimizing pushes ``both`` to 0 whenever it can, so the
+                # one-sided ``both >= xi + xj - 1`` is all that is needed.
+                both = model.new_bool_var(f"intl_both_{uid_i}_{uid_j}_{eid}")
+                model.add_bool_or([xi.Not(), xj.Not(), both])
+                pairs.append((both, weight))
+    if not pairs:
         return None
-    return sum(terms)
+    return _wsum(pairs)
 
 
 def _build_s_intl_fair_term(
-    model: cp_model.CpModel,
-    flights: list[FlightInput],
-    staff: list[StaffMember],
-    x: dict[tuple[str, str], Any],
+    model: cp_model.CpModel, idx: _Index, staff: list[StaffMember],
 ) -> Any:
     """Phase 4 / Change 6 — soft penalty on INTL DEP distribution variance
     within each shift.
 
     For each shift in ``S_INTL_FAIR_SHIFTS``, compute ``intl_max - intl_min``
-    across all non-handler staff on that shift; weight by
-    ``S_INTL_FAIR_PENALTY`` and add to the objective.
+    across the staff on that shift; weight by ``S_INTL_FAIR_PENALTY`` and
+    add to the objective.
 
     Uses the same max/min-IntVar pattern as the H18 spread mechanism — cheap
     O(shifts) constraints, no quadratic blowup.
     """
-    intl_flight_ids = {f.unique_id for f in flights if f.is_international}
-    if not intl_flight_ids:
+    n_intl = sum(1 for f in idx.flight_by_uid.values() if f.is_international)
+    if not n_intl:
         return 0
-    # Bucket staff by shift (skip AM, skip off-day, skip handlers' bucket
-    # mixing — handlers are kept in their own bucket to avoid pulling the
-    # min down with a P2F handler who only does INTL incidentally).
     bucket_by_shift: dict[str, list[StaffMember]] = defaultdict(list)
     for s in staff:
-        if s.shift_today is None or s.role == Role.AM:
-            continue
-        if s.shift_today not in S_INTL_FAIR_SHIFTS:
+        if not _flying(s) or s.shift_today not in S_INTL_FAIR_SHIFTS:
             continue
         bucket_by_shift[s.shift_today].append(s)
 
@@ -633,19 +617,13 @@ def _build_s_intl_fair_term(
     for shift_code, bucket in bucket_by_shift.items():
         if len(bucket) < 2:
             continue
-        # intl count per staff in this shift; range [0, len(intl)].
-        upper = len(intl_flight_ids)
-        intl_min = model.new_int_var(
-            0, upper, f"intl_min_{shift_code}"
-        )
-        intl_max = model.new_int_var(
-            0, upper, f"intl_max_{shift_code}"
-        )
+        intl_min = model.new_int_var(0, n_intl, f"intl_min_{shift_code}")
+        intl_max = model.new_int_var(0, n_intl, f"intl_max_{shift_code}")
         n_pinned = 0
         for s in bucket:
             intl_vars = [
-                x[(fid, s.employee_id)] for fid in intl_flight_ids
-                if (fid, s.employee_id) in x
+                v for uid, v in idx.by_staff.get(s.employee_id, ())
+                if idx.flight_by_uid[uid].is_international
             ]
             if not intl_vars:
                 continue
@@ -660,12 +638,7 @@ def _build_s_intl_fair_term(
     return sum(terms)
 
 
-def _build_s_band_shift_stability_term(
-    flights: list[FlightInput],
-    staff: list[StaffMember],
-    x: dict[tuple[str, str], Any],
-    ops_day: date_t,
-) -> Any:
+def _build_s_band_shift_stability_term(idx: _Index, ops_day: date_t) -> Any:
     """Patch 2026-05-15 — band-targeted "prefer stable shift" penalty.
 
     For every (flight, staff) pair where:
@@ -684,25 +657,20 @@ def _build_s_band_shift_stability_term(
     (100 000) and the outer-band penalty (5 000), so the solver
     won't leave a flight unallocated to avoid the boundary case.
     """
-    terms: list[Any] = []
-    for f in flights:
+    pairs: list[tuple[Any, int]] = []
+    for uid, cands in idx.by_flight.items():
+        f = idx.flight_by_uid[uid]
         if not is_in_rush_band(f.std, f.date, ops_day):
             continue
-        for s in staff:
-            if s.shift_today is None or s.role == Role.AM:
-                continue
-            if (f.unique_id, s.employee_id) not in x:
-                continue
-            if shift_boundary_within_30min(
+        for eid, v in cands:
+            s = idx.staff_by_id.get(eid)
+            if _flying(s) and shift_boundary_within_30min(
                 s.shift_today, f.std, f.date, ops_day,
             ):
-                terms.append(
-                    S_BAND_SHIFT_STABILITY_PENALTY
-                    * x[(f.unique_id, s.employee_id)]
-                )
-    if not terms:
+                pairs.append((v, S_BAND_SHIFT_STABILITY_PENALTY))
+    if not pairs:
         return None
-    return sum(terms)
+    return _wsum(pairs)
 
 
 def _resolve_num_workers(configured: int = 0) -> int:
@@ -748,6 +716,7 @@ def solve_allocation(
     day_level_by_bucket: dict[tuple[str, Role], int] | None = None,
     pinned_assignments: dict[str, str] | None = None,
     hard_bucket_spread_max: int | None = None,
+    spread_exempt_ids: frozenset[str] = frozenset(),
 ) -> AllocationSolverResult:
     """Solve the allocation problem.
 
@@ -784,27 +753,19 @@ def solve_allocation(
     model = cp_model.CpModel()
     staff_by_id = {s.employee_id: s for s in staff}
 
-    # ---- Decision variables + per-staff flight lists ----
+    # ---- Decision variables ----
     x: dict[tuple[str, str], cp_model.IntVar] = {}
-    # Phase R: switched from intervals_by_staff (used with add_no_overlap)
-    # to flights_by_staff (used to build per-pair H10 constraints below).
-    # The pairwise formulation lets us skip exactly the pairs the operator
-    # waived via an override of type=waive_h10_pair, without compromising H10
-    # against the staff's other flights.
-    flights_by_staff: dict[str, list[FlightInput]] = defaultdict(list)
     flight_by_uid: dict[str, FlightInput] = {f.unique_id: f for f in flights}
 
-    for flight in flights:
-        eligible_ids = eligibility.get(flight.unique_id, set())
-        for emp_id in eligible_ids:
+    for uid in flight_by_uid:
+        for emp_id in eligibility.get(uid, ()):
             if emp_id not in staff_by_id:
                 # Defensive: eligibility names a staff we don't have.
                 # Skip rather than crash — caller's bug, surface as
                 # missing eligibility downstream.
                 continue
-            v = model.new_bool_var(f"x_{flight.unique_id}_{emp_id}")
-            x[(flight.unique_id, emp_id)] = v
-            flights_by_staff[emp_id].append(flight)
+            x[(uid, emp_id)] = model.new_bool_var(f"x_{uid}_{emp_id}")
+    idx = _Index.build(flights, staff, x, ops_day)
 
     # ---- H1 (relaxed): at most one staff per flight ----
     # Hard constraint: a flight cannot be assigned to two staff.
@@ -814,75 +775,109 @@ def solve_allocation(
     # assignment via _UNASSIGNED_PENALTY below.
     unassigned_indicators: list[Any] = []
     p2f_unassigned_indicators: list[Any] = []
-    for flight in flights:
-        eligible_ids = eligibility.get(flight.unique_id, set())
-        present = [
-            x[(flight.unique_id, eid)] for eid in eligible_ids
-            if (flight.unique_id, eid) in x
-        ]
+    unassigned_by_uid: dict[str, Any] = {}
+    for uid, flight in flight_by_uid.items():
+        present = [v for _eid, v in idx.by_flight.get(uid, ())]
         if not present:
             # Treat as unconditionally unassigned (matrix had no eligible
             # staff). The orchestrator should already have logged W201;
             # we just need a sentinel so the count is right.
-            const_one = model.new_constant(1)
-            unassigned_indicators.append(const_one)
+            unassigned_indicators.append(model.new_constant(1))
+            continue
+        # Exactly one of {its eligible staff, "unassigned"}.
+        ind = model.new_bool_var(f"unassigned_{uid}")
+        model.add_exactly_one(present + [ind])
+        unassigned_by_uid[uid] = ind
+        # P2F flights carry a heavier penalty (see
+        # P2F_UNASSIGNED_PENALTY) so they win any tie against a
+        # normal flight for the handler's cap / spacing.
+        if flight.ops_class == OpsClass.P2F:
+            p2f_unassigned_indicators.append(ind)
         else:
-            model.add(sum(present) <= 1)
-            # 1 - sum(present) is 1 when the flight is unassigned,
-            # 0 otherwise. We sum these into the objective.
-            ind = model.new_bool_var(f"unassigned_{flight.unique_id}")
-            model.add(ind == 1 - sum(present))
-            # P2F flights carry a heavier penalty (see
-            # P2F_UNASSIGNED_PENALTY) so they win any tie against a
-            # normal flight for the handler's cap / spacing.
-            if flight.ops_class == OpsClass.P2F:
-                p2f_unassigned_indicators.append(ind)
-            else:
-                unassigned_indicators.append(ind)
+            unassigned_indicators.append(ind)
 
-    # ---- H10: per-staff same-flight spacing, waiver-aware ----
-    # Replaces the prior model.add_no_overlap formulation. For every pair
-    # of flights eligible to the same staff with gap < required spacing
-    # (15 min, or 30 for domestic→INTL and for two P2F flights), add an
-    # at-most-one constraint UNLESS the operator waived this pair via an
-    # override of type=waive_h10_pair.
+    # ---- H10: per-staff spacing (15 min; 30 for domestic→INTL and for
+    # two P2F flights), as clique constraints ----
+    # 2026-10-10: the pairwise form (one ``x_i + x_j <= 1`` per close
+    # pair) produced ~3.7M constraints on a 2,100-flight day — minutes of
+    # model building and a weak LP relaxation. The same rule written as
+    # cliques:
+    #   * every 15-min window [t, t+15) of one person's flights holds at
+    #     most one (all flights in it are pairwise < 15 apart);
+    #   * an INTL flight at T and the domestic flights in (T-30, T-15]
+    #     hold at most one (those domestics are < 15 apart themselves);
+    #   * likewise a P2F flight at T and the P2F flights in (T-30, T-15].
+    # Together these forbid exactly the pairs ``required_spacing_min``
+    # forbids. Staff with an operator H10 waiver keep the pairwise form
+    # so the waived pair alone can be skipped.
+    waived_staff = {emp for _a, _b, emp in waive_h10_triples}
+    n_h10_cliques = 0
     n_h10_pairs = 0
     n_h10_waived = 0
-    for emp_id, emp_flights in flights_by_staff.items():
-        if len(emp_flights) < 2:
+    for emp_id, my in idx.by_staff.items():
+        if len(my) < 2:
             continue
-        # Sort by STD so we iterate close-in-time pairs first.
-        with_key = sorted(
-            ((spacing_key(f, ops_day), f) for f in emp_flights),
+        keyed = sorted(
+            (
+                (spacing_key(idx.flight_by_uid[uid], ops_day), uid, v)
+                for uid, v in my
+            ),
             key=lambda t: t[0][0],
         )
-        for i in range(len(with_key)):
-            key_i, fi = with_key[i]
-            for j in range(i + 1, len(with_key)):
-                key_j, fj = with_key[j]
-                gap = key_j[0] - key_i[0]
-                if gap >= SPACING_MAX_MIN:
-                    # Pairs from here on are even further apart (sorted).
-                    break
-                if gap >= required_spacing_min(key_i, key_j):
-                    continue
-                # Phase R waiver check. Order-insensitive — both
-                # (uid_a, uid_b, emp) and (uid_b, uid_a, emp) accepted.
-                if (
-                    (fi.unique_id, fj.unique_id, emp_id) in waive_h10_triples
-                    or (fj.unique_id, fi.unique_id, emp_id) in waive_h10_triples
-                ):
-                    n_h10_waived += 1
-                    continue
-                model.add(
-                    x[(fi.unique_id, emp_id)] + x[(fj.unique_id, emp_id)] <= 1
-                )
-                n_h10_pairs += 1
-    if waive_h10_triples:
-        print(
-            f"  H10 pairwise: {n_h10_pairs} forbidden, "
-            f"{n_h10_waived} waived via override"
+        if emp_id in waived_staff:
+            for i, (key_i, uid_i, vi) in enumerate(keyed):
+                for key_j, uid_j, vj in keyed[i + 1:]:
+                    gap = key_j[0] - key_i[0]
+                    if gap >= SPACING_MAX_MIN:
+                        break
+                    if gap >= required_spacing_min(key_i, key_j):
+                        continue
+                    if (
+                        (uid_i, uid_j, emp_id) in waive_h10_triples
+                        or (uid_j, uid_i, emp_id) in waive_h10_triples
+                    ):
+                        n_h10_waived += 1
+                        continue
+                    model.add(vi + vj <= 1)
+                    n_h10_pairs += 1
+            continue
+        times = [k[0] for k, _u, _v in keyed]
+        # 15-min sliding windows; a window whose right edge did not move
+        # is a subset of the previous one and adds nothing.
+        j = 0
+        last_end = -1
+        for i in range(len(keyed)):
+            if j < i:
+                j = i
+            while j < len(keyed) and times[j] < times[i] + SPACING_HARD_MIN:
+                j += 1
+            if j - i >= 2 and j != last_end:
+                model.add_at_most_one([v for _k, _u, v in keyed[i:j]])
+                n_h10_cliques += 1
+            last_end = j
+        # 30-min rules: the later flight plus the qualifying earlier ones
+        # in (T-30, T-15].
+        for key_j, _uid_j, vj in keyed:
+            t_j, intl_j, p2f_j = key_j
+            hi = bisect_right(times, t_j - SPACING_HARD_MIN)
+            groups = []
+            if intl_j:
+                lo = bisect_right(times, t_j - SPACING_DOM_TO_INTL_MIN)
+                groups.append([v for k, _u, v in keyed[lo:hi] if not k[1]])
+            if p2f_j:
+                lo = bisect_right(times, t_j - SPACING_P2F_PAIR_MIN)
+                groups.append([v for k, _u, v in keyed[lo:hi] if k[2]])
+            for group in groups:
+                if group:
+                    model.add_at_most_one(group + [vj])
+                    n_h10_cliques += 1
+    print(
+        f"  H10: {n_h10_cliques} spacing cliques"
+        + (
+            f", {n_h10_pairs} pairwise for waived staff "
+            f"({n_h10_waived} pair(s) waived)" if waived_staff else ""
         )
+    )
 
     from ..schemas import OpsClass as _OpsClass
 
@@ -902,6 +897,12 @@ def solve_allocation(
         if s.shift_today is None or s.role == Role.AM:
             continue
         if s.employee_id in excluded_handlers:
+            continue
+        # Staff held below the bucket by their own cap / window / supply
+        # (see step3 ``spread_exempt_ids``) would otherwise set
+        # bucket_min and drag every colleague down with them. They are
+        # still steered by S1 toward the day level.
+        if s.employee_id in spread_exempt_ids:
             continue
         spread_groups[(s.shift_today, s.role)].append(s)
     # Per (shift, role) bucket, pin every assigned staff's count to
@@ -945,10 +946,7 @@ def solve_allocation(
                 band = get_band(shift_code, role)
                 if band is not None:
                     s = bucket[0]
-                    my_vars = [
-                        x[(f.unique_id, s.employee_id)] for f in flights
-                        if (f.unique_id, s.employee_id) in x
-                    ]
+                    my_vars = idx.staff_vars(s.employee_id)
                     if my_vars:
                         # 2026-09-22 fix (2nd pass): SOFT floor, not
                         # hard. A hard `model.add(sum >= band["min"])`
@@ -1010,22 +1008,25 @@ def solve_allocation(
         # below band_lo) would still be constrained via
         # ``actual_expr >= bucket_min >= band_lo``, silently
         # reintroducing the same infeasibility this fix removes.
+        # 2026-10-10: ``hi`` is no longer a HARD per-staff ceiling. Capping
+        # everyone at day_level + 1 (below their H16 cap) left flights
+        # UNALLOCATED whenever the level estimate ran a flight short, and
+        # silently overrode raise_cap overrides. H16 is the only hard
+        # ceiling now; going above the level is priced by S1 (200/unit)
+        # and the S1b spread terms, both far below an unassigned flight.
+        dom_hi = len(flights)
         bucket_min = model.new_int_var(
-            0, hi, f"bmin_{shift_code}_{role.value}",
+            0, dom_hi, f"bmin_{shift_code}_{role.value}",
         )
         bucket_max = model.new_int_var(
-            0, hi, f"bmax_{shift_code}_{role.value}",
+            0, dom_hi, f"bmax_{shift_code}_{role.value}",
         )
         n_constrained = 0
         for s in bucket:
-            emp_vars = [
-                x[(f.unique_id, s.employee_id)] for f in flights
-                if (f.unique_id, s.employee_id) in x
-            ]
+            emp_vars = idx.staff_vars(s.employee_id)
             if not emp_vars:
                 continue
             actual_expr = sum(emp_vars)
-            model.add(actual_expr <= hi)
             model.add(actual_expr >= bucket_min)
             model.add(actual_expr <= bucket_max)
             if band_lo > 0:
@@ -1051,7 +1052,7 @@ def solve_allocation(
             # of the base per-unit cost above, so a 3-flight gap costs
             # noticeably more than two separate 1-flight gaps would.
             spread_excess = model.new_int_var(
-                0, hi, f"spread_excess_{shift_code}_{role.value}",
+                0, dom_hi, f"spread_excess_{shift_code}_{role.value}",
             )
             model.add(spread_excess >= (bucket_max - bucket_min) - 1)
             spread_obj_terms.append(S1B_WEIGHT_SPREAD_TIER2 * spread_excess)
@@ -1065,7 +1066,7 @@ def solve_allocation(
         floor_note = f" (soft floor={band_lo})" if band_lo > 0 else ""
         print(f"  H18 spread bucket {shift_code}/{role.value}: "
               f"{len(bucket)} staff ({n_constrained} pinned), "
-              f"target={target}, range=[0, {hi}]{floor_note}")
+              f"target={target}, level+1={hi} (soft){floor_note}")
     print(f"  H18 total buckets pinned: {n_h18_buckets}")
 
     # ---- H19 removed 2026-05-11 ----
@@ -1085,10 +1086,8 @@ def solve_allocation(
         p2f_handler_set_for_cap = elig_ctx.all_p2f_handler_ids
         for emp_id in p2f_handler_set_for_cap:
             p2f_vars = [
-                x[(f.unique_id, emp_id)]
-                for f in flights
-                if f.ops_class == _OpsClass.P2F
-                and (f.unique_id, emp_id) in x
+                v for uid, v in idx.by_staff.get(emp_id, ())
+                if idx.flight_by_uid[uid].ops_class == _OpsClass.P2F
             ]
             if p2f_vars:
                 model.add(sum(p2f_vars) <= p2f_cap_per_handler)
@@ -1101,16 +1100,14 @@ def solve_allocation(
     #     at or below the workload of non-handler peers since their
     #     P2F flights eat into the cap.
 
-    for emp_id in flights_by_staff:
+    for emp_id in idx.by_staff:
         cap = hard_cap_for(staff_by_id[emp_id])
         # Phase R: ``raise_cap_uids`` lets the operator nominate one
         # specific (flight, staff) pair to land OUTSIDE the H16 cap.
         # Effectively "this flight is on top of cap".
         emp_vars = [
-            x[(f.unique_id, emp_id)]
-            for f in flights
-            if (f.unique_id, emp_id) in x
-            and (f.unique_id, emp_id) not in raise_cap_uids
+            v for uid, v in idx.by_staff[emp_id]
+            if (uid, emp_id) not in raise_cap_uids
         ]
         if emp_vars:
             model.add(sum(emp_vars) <= cap)
@@ -1125,6 +1122,7 @@ def solve_allocation(
     # H10 / existing pins, so this cannot make the model infeasible.
     # Normal flights are then solved around them; any P2F flight not
     # reserved still gets the heavier P2F_UNASSIGNED_PENALTY above.
+    reserved_p2f: dict[str, str] = {}
     if elig_ctx is not None and elig_ctx.p2f_handler_by_shift:
         reserved_p2f, skipped_p2f = select_p2f_priority(
             flights,
@@ -1160,10 +1158,12 @@ def solve_allocation(
     unassigned_penalty = 100_000
     obj_terms: list[Any] = []
     if unassigned_indicators:
-        obj_terms.append(unassigned_penalty * sum(unassigned_indicators))
+        obj_terms.append(
+            unassigned_penalty * cp_model.LinearExpr.sum(unassigned_indicators)
+        )
     if p2f_unassigned_indicators:
         obj_terms.append(
-            P2F_UNASSIGNED_PENALTY * sum(p2f_unassigned_indicators)
+            P2F_UNASSIGNED_PENALTY * cp_model.LinearExpr.sum(p2f_unassigned_indicators)
         )
     # S1b bucket spread minimization — wired alongside S1 count balance.
     # Always on when S1 is enabled (they're complementary: S1 pins each
@@ -1173,44 +1173,40 @@ def solve_allocation(
         obj_terms.append(sum(spread_obj_terms))
     if enable_s1_count_balance:
         obj_terms.append(
-            _build_s1_term(model, flights, staff, x, day_level_by_bucket)
+            _build_s1_term(model, idx, staff, day_level_by_bucket)
         )
     if enable_s3_heavy_spread:
-        obj_terms.append(_build_s3_term(model, flights, staff, x))
+        obj_terms.append(_build_s3_term(model, idx, staff))
     if enable_s4_pair_stability:
-        obj_terms.append(_build_s4_term(flights, staff, x))
+        obj_terms.append(_build_s4_term(idx, staff))
     if enable_s5_handover_preference:
-        obj_terms.append(_build_s5_handover_term(flights, staff, x, ops_day))
+        obj_terms.append(_build_s5_handover_term(idx))
     if enable_s6_awkward_preference:
-        obj_terms.append(_build_s6_awkward_term(flights, staff, x, ops_day))
+        obj_terms.append(_build_s6_awkward_term(idx, ops_day))
     if enable_s7_zc_buffer_avoidance:
-        obj_terms.append(_build_s7_zc_buffer_term(flights, staff, x, ops_day))
+        obj_terms.append(_build_s7_zc_buffer_term(idx, staff))
     # Phase 4 / Changes 5 + 6 (2026-05-14, INTL overhaul).
     # The helpers return ``None`` when there's nothing to penalize; a
     # CP-SAT LinearExpr otherwise. CP-SAT LinearExpr raises on bool() and
     # on equality with int, so test with ``is not None`` only.
     if enable_s_intl_spacing:
-        spacing_term = _build_s_intl_spacing_term(
-            model, flights, staff, x, eligibility, ops_day,
-        )
+        spacing_term = _build_s_intl_spacing_term(model, idx)
         if spacing_term is not None:
             obj_terms.append(spacing_term)
     if enable_s_intl_fair:
-        fair_term = _build_s_intl_fair_term(model, flights, staff, x)
+        fair_term = _build_s_intl_fair_term(model, idx, staff)
         if fair_term is not None:
             obj_terms.append(fair_term)
     # Patch 2026-05-15 — band-targeted "prefer stable shift" within
     # the rush bands.
     if enable_s_band_shift_stability:
-        stability_term = _build_s_band_shift_stability_term(
-            flights, staff, x, ops_day,
-        )
+        stability_term = _build_s_band_shift_stability_term(idx, ops_day)
         if stability_term is not None:
             obj_terms.append(stability_term)
     # S_outer is always on (no flag) — penalizes A/A1 outer-band STDs
     # so the solver only uses them when the inner band can't absorb
     # the flight. Required by user direction 2026-05-12 §1.
-    obj_terms.append(_build_outer_band_term(flights, staff, x, ops_day))
+    obj_terms.append(_build_outer_band_term(idx, staff, ops_day))
     if obj_terms:
         model.minimize(sum(obj_terms))
 
@@ -1225,95 +1221,110 @@ def solve_allocation(
     # runs) are silently skipped; the solver is otherwise free for
     # those rows. Returns to a cold solve when ``pinned_assignments``
     # is None or empty.
+    #
+    # 2026-10-10: pins are checked against each other (and against the
+    # reserved P2F flights) for H10 spacing and the H16 cap before they
+    # are fixed. Two pins that clash would make the WHOLE model
+    # INFEASIBLE; the clashing one is released instead and left for the
+    # solver to place.
     n_pinned_applied = 0
     n_pinned_skipped = 0
+    n_pinned_released = 0
     if pinned_assignments:
-        for fid, eid in pinned_assignments.items():
+        held_keys: dict[str, list[tuple[str, Any]]] = defaultdict(list)
+        held_count: dict[str, int] = defaultdict(int)
+        for _uid, _eid in reserved_p2f.items():
+            _f = flight_by_uid.get(_uid)
+            if _f is None or (_uid, _eid) not in x:
+                continue
+            held_keys[_eid].append((_uid, spacing_key(_f, ops_day)))
+            if (_uid, _eid) not in raise_cap_uids:
+                held_count[_eid] += 1
+        ordered_pins = sorted(
+            (
+                (fid, eid) for fid, eid in pinned_assignments.items()
+                if fid in flight_by_uid
+            ),
+            key=lambda p: spacing_key(flight_by_uid[p[0]], ops_day)[0],
+        )
+        n_pinned_skipped += len(pinned_assignments) - len(ordered_pins)
+        for fid, eid in ordered_pins:
             target = x.get((fid, eid))
             if target is None:
                 n_pinned_skipped += 1
                 continue
+            if reserved_p2f.get(fid) == eid:
+                n_pinned_applied += 1   # already fixed by P2F-first
+                continue
+            key = spacing_key(flight_by_uid[fid], ops_day)
+            clash = any(
+                abs(key[0] - okey[0]) < required_spacing_min(key, okey)
+                and (fid, ouid, eid) not in waive_h10_triples
+                and (ouid, fid, eid) not in waive_h10_triples
+                for ouid, okey in held_keys[eid]
+            )
+            counts_to_cap = (fid, eid) not in raise_cap_uids
+            over_cap = counts_to_cap and (
+                held_count[eid] + 1 > hard_cap_for(staff_by_id[eid])
+            )
+            if clash or over_cap:
+                n_pinned_released += 1
+                continue
             model.add(target == 1)
+            held_keys[eid].append((fid, key))
+            if counts_to_cap:
+                held_count[eid] += 1
             n_pinned_applied += 1
+        if n_pinned_released:
+            print(
+                f"  solver: released {n_pinned_released} pin(s) that clashed "
+                "with another pin on H10 spacing or the H16 cap"
+            )
         if n_pinned_applied or n_pinned_skipped:
             print(
                 f"  solver: pinned {n_pinned_applied} prior assignment(s); "
                 f"{n_pinned_skipped} skipped (no longer eligible)"
             )
 
-    # ---- Warm-start hints (Phase R — recommender re-solve speedup) ----
-    # When ``solution_hints`` is supplied, mark each (flight, staff) pair
-    # in it with x=1 and every other variable for that flight with x=0.
-    # CP-SAT uses the hint as the search's starting point — if the hint
-    # is still feasible under the (possibly-changed) constraints, the
-    # solver typically returns in 30-60 % of the cold-start time.
+    # ---- Warm start: one COMPLETE hint ----
+    # ``solution_hints`` (the previous run's {uid: emp}) and the pins are
+    # taken as given; a greedy pass (H1/H10/H16 — allocator/
+    # greedy_fallback.py) fills every other flight around them. EVERY x
+    # var and every ``unassigned`` indicator is then hinted 0 or 1.
     #
-    # Hints are SUGGESTIONS, not constraints. If a hint pair is no longer
-    # eligible (e.g. an override removed that staff's slot), the solver
-    # silently ignores that hint and searches normally.
-    n_hints_applied = 0
+    # 2026-10-10: the hint used to mark only the chosen pairs (x=1).
+    # With ~180k other x vars left open, CP-SAT could not turn it into a
+    # solution — on a 2,100-flight day it found NOTHING in 10s, and
+    # nothing in the 60s spread probe either. A complete, feasible hint
+    # is accepted as the first incumbent almost immediately, so even a
+    # short time budget starts from a full allocation and only improves.
+    #
+    # Hints are SUGGESTIONS, not constraints: anything no longer
+    # eligible is simply not hinted and the solver searches normally.
     n_caller_hints = 0
-    hinted_fids: set[str] = set()
-    if solution_hints:
-        for fid, eid in solution_hints.items():
-            target = x.get((fid, eid))
-            if target is None:
-                continue
-            model.add_hint(target, 1)
-            n_hints_applied += 1
+    caller_fixed: dict[str, str] = {}
+    for fid, eid in (solution_hints or {}).items():
+        if (fid, eid) in x:
+            caller_fixed[fid] = eid
             n_caller_hints += 1
-            hinted_fids.add(fid)
-        if n_caller_hints:
-            print(
-                f"  solver: warm-start with {n_caller_hints} solution "
-                f"hints (of {len(solution_hints)} requested)"
-            )
-
-    # ---- Heuristic warm start for genuinely cold solves (speed only) ----
-    # A caller-supplied ``solution_hints`` (above) comes from a PRIOR
-    # CP-SAT solve, so high coverage of it is a trustworthy near-optimal
-    # upper bound — that's what earns the aggressive 200s/5%-gap
-    # "re-solve mode" below. A first-ever Plan/Allocate for the day has
-    # no such hints and CP-SAT starts its search from nothing, spending
-    # real time just to find ANY feasible point before it can start
-    # improving. We close that gap with a cheap greedy seed (H1/H10/H16
-    # only — allocator/greedy_fallback.py) for whatever flights the
-    # caller didn't already hint.
-    #
-    # This is deliberately NOT allowed to change the acceptance bar: it
-    # is excluded from the ``n_caller_hints`` count used by the re-solve
-    # gate just below, so a cold solve still gets the full max_seconds
-    # budget and the full (0%-gap / proven-optimal-or-timeout) standard —
-    # it just starts the search from a much better point, which tends to
-    # improve both how fast a good answer is found AND how good the
-    # answer is if the clock does run out.
-    if n_caller_hints < max(1, len(flights) // 2):
-        # Also skip anything already pinned (hard-fixed) above — hinting
-        # a different staff there would just be a contradictory no-op.
-        pinned_fids = set(pinned_assignments) if pinned_assignments else set()
-        remaining_flights = [
-            f for f in flights
-            if f.unique_id not in hinted_fids and f.unique_id not in pinned_fids
-        ]
-        if remaining_flights:
-            greedy_seed = greedy_allocate(
-                remaining_flights, staff, eligibility, ops_day=ops_day,
-            )
-            n_greedy_applied = 0
-            for fid, eid in greedy_seed.items():
-                target = x.get((fid, eid))
-                if target is None:
-                    continue
-                model.add_hint(target, 1)
-                n_hints_applied += 1
-                n_greedy_applied += 1
-            if n_greedy_applied:
-                print(
-                    f"  solver: cold-solve warm start — seeded "
-                    f"{n_greedy_applied} greedy-heuristic hint(s) for "
-                    f"{len(remaining_flights)} unhinted flight(s) (speed "
-                    "only; does not relax the optimality bar)"
-                )
+    if n_caller_hints:
+        print(
+            f"  solver: warm-start with {n_caller_hints} solution "
+            f"hints (of {len(solution_hints or {})} requested)"
+        )
+    fixed = {**caller_fixed, **reserved_p2f, **(pinned_assignments or {})}
+    chosen = greedy_allocate(
+        flights, staff, eligibility, ops_day=ops_day, preassigned=fixed,
+    )
+    for (uid, eid), v in x.items():
+        model.add_hint(v, 1 if chosen.get(uid) == eid else 0)
+    for uid, ind in unassigned_by_uid.items():
+        model.add_hint(ind, 0 if uid in chosen else 1)
+    print(
+        f"  solver: complete warm start — {len(chosen)}/{len(flights)} "
+        f"flights placed in the hint ({n_caller_hints} from the previous "
+        "run, rest greedy)"
+    )
 
     # ---- Solve ----
     # Per user direction 2026-05-11: time budget removed — solver runs
@@ -1333,6 +1344,16 @@ def solve_allocation(
     # an escape hatch. We rely on CP-SAT's default randomness so the
     # operator can simply re-run when a result looks thin.
     solver.parameters.stop_after_first_solution = False
+    # 2026-10-10 (speed): light presolve. On a 2,100-flight day the full
+    # presolve (two rounds of probing, symmetry detection, big-overlap
+    # detection) took ~27s of wall clock before search even started —
+    # a 30s budget ended with no solution at all. The model is already
+    # tight (clique H10, exactly-one H1) and starts from a complete
+    # feasible hint, so the search time is worth far more than that.
+    solver.parameters.cp_model_probing_level = 0
+    solver.parameters.max_presolve_iterations = 1
+    solver.parameters.symmetry_level = 0
+    solver.parameters.find_big_linear_overlap = False
     # 2026-05-28 (user direction — slow re-solve fix): when warm-start
     # hints are present in meaningful quantity, the prior allocation is
     # a tight upper bound on the objective. Without an early-exit
@@ -1344,7 +1365,7 @@ def solve_allocation(
     # Two-tier behavior:
     #   * n_caller_hints >= 50% of total flights → "re-solve mode":
     #     cap wall-clock at 200s AND accept 5% gap. Sick / recommender
-    #     re-solves complete in 30-60s typical (vs 700s cold) because
+    #     re-solves usually stop well inside the budget because
     #     CP-SAT proves the warm-started solution near-optimal fast.
     #   * Fewer hints → "cold-solve mode": full max_seconds, full proof.
     # Gated on ``n_caller_hints`` (genuine prior-solution hints) only —
@@ -1390,21 +1411,3 @@ def solve_allocation(
     )
 
 
-def solve_allocation_hard_only(
-    flights: list[FlightInput],
-    staff: list[StaffMember],
-    eligibility: dict[str, set[str]],
-    *,
-    ops_day: date_t,
-    max_seconds: int = 60,
-) -> AllocationSolverResult:
-    """E5 entry point — hard constraints only, no soft objective.
-
-    Thin wrapper around solve_allocation with all soft-objective flags
-    False. Kept for tests that assert pure constraint behavior in
-    isolation.
-    """
-    return solve_allocation(
-        flights, staff, eligibility,
-        ops_day=ops_day, max_seconds=max_seconds,
-    )

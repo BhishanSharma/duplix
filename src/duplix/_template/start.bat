@@ -15,32 +15,38 @@ if not exist "%REPO_ROOT%.venv\Scripts\activate.bat" (
     echo No .venv\ found — bootstrapping. This is a one-time ~2 min setup.
     echo.
 
-    REM Find a Python 3.11 interpreter. Try py launcher first, then python.
+    REM Find Python 3.11-3.14 (what the pinned packages support). Try the
+    REM py launcher's versions newest first, then plain "python".
     set "PY_CMD="
+    set "PY_OK=import sys; sys.exit(0 if (3, 11) <= sys.version_info[:2] <= (3, 14) else 1)"
     where py >nul 2>nul
     if !errorlevel! equ 0 (
-        python -c "import sys" >nul 2>nul
-        if !errorlevel! equ 0 set "PY_CMD=python"
+        for %%v in (3.14 3.13 3.12 3.11) do (
+            if not defined PY_CMD (
+                py -%%v -c "!PY_OK!" >nul 2>nul
+                if !errorlevel! equ 0 set "PY_CMD=py -%%v"
+            )
+        )
     )
     if not defined PY_CMD (
         where python >nul 2>nul
         if !errorlevel! equ 0 (
-            for /f "tokens=2" %%v in ('python --version 2^>^&1') do (
-                echo Found python %%v
-            )
-            set "PY_CMD=python"
+            python -c "!PY_OK!" >nul 2>nul
+            if !errorlevel! equ 0 set "PY_CMD=python"
         )
     )
     if not defined PY_CMD (
         echo.
-        echo ERROR: No Python 3.11 found.
-        echo   1. Install Python 3.11 from https://python.org
+        echo ERROR: No supported Python found ^(needs 3.11 to 3.14^).
+        for /f "tokens=*" %%v in ('python --version 2^>^&1') do echo   Found: %%v
+        echo   1. Install Python 3.13 from https://python.org
         echo   2. During install, tick "Add Python to PATH"
         echo   3. Double-click this file again.
         echo.
         pause
         exit /b 1
     )
+    echo Using !PY_CMD! ^(Python 3.11-3.14 required^).
 
     echo Creating .venv with !PY_CMD! ...
     !PY_CMD! -m venv .venv
@@ -89,7 +95,7 @@ if errorlevel 1 (
 
 :run
 set "PYTHONPATH=%REPO_ROOT%;%PYTHONPATH%"
-python -m src.cli
+python -m src.web
 set "EXIT_CODE=!errorlevel!"
 if !EXIT_CODE! neq 0 (
     echo.

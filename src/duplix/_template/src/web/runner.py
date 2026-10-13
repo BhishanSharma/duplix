@@ -143,10 +143,10 @@ def _dispatch(
     state: AppState, d_day: date_t, sub_command: str, pin_prior: bool = False,
 ) -> dict[str, int]:
     """Run one stage and return its counts."""
-    from ..plan import run as run_plan
-    from ..step1_clean_flights import run as run_step1
-    from ..step2_extract_roster import run as run_step2
-    from ..step3_allocate_flights import run as run_allocate
+    from ..pipeline.plan import run as run_plan
+    from ..pipeline.step1_clean_flights import run as run_step1
+    from ..pipeline.step2_extract_roster import run as run_step2
+    from ..pipeline.step3_allocate_flights import run as run_allocate
 
     if sub_command in ("plan", "all", "step1", "step2"):
         # A fresh Plan rebuilds flights + roster, so any allocation still

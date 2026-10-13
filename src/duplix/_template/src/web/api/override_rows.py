@@ -65,7 +65,7 @@ def register(router: Router) -> None:
         applied: dict[str, int] = {}
         d_day = parse_date(body.get("date"))
         if d_day is not None:
-            from ... import staged_overrides as _so
+            from ...pipeline import staged_overrides as _so
             applied = _so.apply_staged_overrides(STATE, d_day)
         return json_response({"updated": True, "applied": applied})
 
@@ -85,7 +85,7 @@ def register(router: Router) -> None:
         d_day = parse_date(req.json().get("date"))
         if d_day is None:
             return bad_request("body.date required (YYYY-MM-DD)")
-        from ... import staged_overrides as _so
+        from ...pipeline import staged_overrides as _so
         try:
             counts = _so.apply_staged_overrides(STATE, d_day)
         except Exception as exc:  # noqa: BLE001
@@ -122,7 +122,7 @@ def register(router: Router) -> None:
         }
         try:
             index = override_ops.write_staged_override(STATE, op_type, payload)
-            from ... import staged_overrides as _so
+            from ...pipeline import staged_overrides as _so
             applied = _so.apply_staged_overrides(STATE, d_day)
         except Exception as exc:  # noqa: BLE001
             logger.exception("staged form %s failed", op_type)

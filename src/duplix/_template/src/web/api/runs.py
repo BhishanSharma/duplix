@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 from datetime import date as date_t
 
-from ...state import STATE
+from ...state import DAILY_INPUT_KINDS, STATE
 from .. import runner
 from ..core.responses import Response, bad_request, conflict, json_response
 from ..core.router import Request, Router
@@ -93,6 +93,10 @@ def register(router: Router) -> None:
 def _reset() -> Response:
     runner.cancel()
     cleared = STATE.reset_results()
+    # Reset starts the day over: the day's flight schedule goes too.
+    # The period rosters (Setup) and override rows are kept.
+    for kind in DAILY_INPUT_KINDS:
+        STATE.clear_input(kind)
     # The drawer promises "defaults restore on Reset" for the
     # per-(shift, role) bands, so clear those too.
     from ...allocator import caps as _caps

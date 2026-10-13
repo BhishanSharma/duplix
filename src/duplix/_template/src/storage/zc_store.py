@@ -214,8 +214,3 @@ def freeze(d: date_t) -> bool:
         return True
 
 
-def _reset_for_tests() -> None:
-    """Drop the in-memory cache (tests point the store at a temp dir)."""
-    global _cache, _cache_path
-    with _lock:
-        _cache, _cache_path = None, None

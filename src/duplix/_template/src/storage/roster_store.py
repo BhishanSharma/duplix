@@ -36,7 +36,7 @@ from pathlib import Path
 
 logger = logging.getLogger("src.web")
 
-_REPO_ROOT = Path(__file__).resolve().parents[1]
+_REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def data_dir() -> Path:

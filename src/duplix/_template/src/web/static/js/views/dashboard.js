@@ -81,14 +81,14 @@ export const template = `
 
   <div class="block" id="ds-charts-block">
     <div class="ds-chart-pair">
-      <div class="ds-chart-cell">
+      <div class="ds-chart-cell after-allocation" hidden>
         <h2>Workload distribution per shift</h2>
         <p class="subdued">% of staff at each workload level today.
           STAFF + ZC merged. The count below each bar is total staff
           present on that shift.</p>
         <div id="ds-workload-dist" class="workload-dist-v"></div>
       </div>
-      <div class="ds-chart-cell">
+      <div class="ds-chart-cell after-allocation" hidden>
         <h2>Flights distributed per shift</h2>
         <p class="subdued">Share of the day's allocated flights
           picked up by each shift.</p>
@@ -119,6 +119,7 @@ export const template = `
       </div>
     </div>
 
+    <div class="after-allocation" hidden>
     <h2 class="block-heading">Shift summary</h2>
     <p class="subdued">Per-shift snapshot — flights, staff, average load,
       INTL count, P2F count, and spread (max-min). Tight spreads
@@ -130,6 +131,7 @@ export const template = `
     <p class="subdued">Allocated flights per hour (D-day local). Peaks
       show the rush windows the solver had to clear.</p>
     <div id="ds-flight-trend" class="flight-trend"></div>
+    </div>
 
     <h2 class="block-heading">Roster by shift</h2>
     <p class="subdued">Today's staff grouped by shift. ZCs listed
@@ -140,7 +142,7 @@ export const template = `
 
   ${staffingPanel.template}
 
-  <div class="block">
+  <div class="block after-allocation" hidden>
     <h2>Workload review</h2>
     <p class="subdued">Staff with cap-related findings worth a quick check.
       Empty list = clean run.</p>
@@ -224,12 +226,21 @@ export async function renderCharts() {
     store.workload.load(),
     store.allocations.load({ force: true }),
     store.staffNames.load({ force: true }),
+    store.plan.load(),
   ]);
   const wlRows = store.workload.data;
   const allocRows = store.allocations.data;
   const names = store.staffNames.data;
   const byStaff = store.shiftByStaff();
   const dDay = store.dashboard.data.run_date || "";
+
+  // Workload / flight charts and the workload review only mean
+  // something once Allocate has produced an allocation — and not after
+  // a re-Plan, which leaves the old one in memory marked stale.
+  const allocated = Boolean(store.plan.data && store.plan.data.allocation_ready);
+  document.querySelectorAll(".after-allocation").forEach((el) => {
+    el.hidden = !allocated;
+  });
 
   workloadDist.render(wlRows);
   flightsPie.render(allocRows, byStaff);

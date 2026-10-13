@@ -25,8 +25,7 @@ The hard `<15 min` same-handler INTL DEP→INTL DEP constraint lives in
 the solver (Change 5, Phase 4 pending). This post-pass takes whatever
 the solver produced and applies the buffer rule.
 
-Design notes lived in ``docs/intl_overhaul_2026-05-14.md`` (not included in
-this repository snapshot).
+The rule set as a whole is described in ``docs/allocation.md``.
 """
 
 from __future__ import annotations
@@ -44,7 +43,7 @@ from ..schemas import (
     ShiftCode,
     StaffMember,
 )
-from .caps import hard_cap_for
+from .caps import hard_cap_for, preferred_target_for
 from .eligibility import sheet_target_for
 from .windows import SpacingKey, spacing_clear, spacing_key, std_to_ops_day_minutes
 
@@ -169,13 +168,21 @@ def _most_eligible(
             return False
         return spacing_clear(flight_key, staff_stds.get(s.employee_id, ()))
 
+    # 2026-10-10: "least loaded" is measured against each person's own
+    # band target (ZC ~14, N STAFF ~19, day STAFF ~22). Comparing raw
+    # counts made ZCs and N staff the default recipient of every
+    # displaced flight. ``target_max`` still caps anyone without a band.
+    def _gap(s: StaffMember) -> int:
+        target = preferred_target_for(s) or target_max
+        return current_counts.get(s.employee_id, 0) - target
+
     def _pick_from(pool: list[StaffMember]) -> StaffMember | None:
-        under = [s for s in pool if current_counts.get(s.employee_id, 0) < target_max]
+        under = [s for s in pool if _gap(s) < 0]
         if under:
-            under.sort(key=lambda s: (current_counts.get(s.employee_id, 0), s.name))
+            under.sort(key=lambda s: (_gap(s), s.name))
             return under[0]
         if pool:
-            pool.sort(key=lambda s: (current_counts.get(s.employee_id, 0), s.name))
+            pool.sort(key=lambda s: (_gap(s), s.name))
             return pool[0]
         return None
 

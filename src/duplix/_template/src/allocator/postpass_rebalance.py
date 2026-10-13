@@ -8,8 +8,8 @@ currently has the most flights. The solver's own within-bucket balancing
 post-pass removals can re-open a spread the solver had just closed: one
 person loses two flights because they happened to work two INTL
 departures back-to-back, another loses none, and the bucket ends up 3-4
-flights apart instead of the intended <=1-2 (see docs/REVIEW_NOTES.md
-finding #4).
+flights apart instead of the intended <=1-2 (see docs/allocation.md,
+"Post-passes").
 
 This pass runs LAST, after both post-passes, and does the obvious thing
 a human scheduler would do: for each (shift, role) bucket (same
@@ -79,12 +79,24 @@ def apply_rebalance_pass(
     target_spread: int = 1,
     max_transfers_per_bucket: int = 40,
     extra_handler_ids: "frozenset[str] | set[str] | tuple[str, ...]" = (),
+    exempt_ids: "frozenset[str] | set[str] | tuple[str, ...]" = (),
+    max_std_by_staff: dict[str, int] | None = None,
+    blocked_windows: dict[str, tuple[int, int]] | None = None,
+    frozen_uids: "frozenset[str] | set[str]" = frozenset(),
 ) -> tuple[list[AllocationRow], RebalanceSummary]:
     """Level workload within each (shift, role) bucket by transferring
     flights from the most- to the least-loaded staff. Returns updated
     rows and a summary the orchestrator can fold into the workload
     notes (same shape as the P2F/INTL post-pass summaries).
+
+    For a second run late in the pipeline: ``max_std_by_staff`` (staff
+    released early -> latest STD they may hold), ``blocked_windows``
+    (staff -> their secured break window) and ``frozen_uids`` (rows that
+    must not move, e.g. force-placed ones) keep it from undoing the
+    relief, break and force-place passes.
     """
+    _max_std = max_std_by_staff or {}
+    _blocked = blocked_windows or {}
     summary = RebalanceSummary()
     flight_by_uid = {f.unique_id: f for f in flights}
     staff_by_id = {s.employee_id: s for s in staff_today}
@@ -124,6 +136,10 @@ def apply_rebalance_pass(
             continue
         if s.employee_id in excluded_handlers:
             continue
+        # Same spread exemption as the solver: someone held low by their
+        # own cap / window would pin min_c and stall the whole bucket.
+        if s.employee_id in exempt_ids:
+            continue
         buckets[(s.shift_today, s.role)].append(s)
 
     for (shift_code, role), bucket in buckets.items():
@@ -140,7 +156,14 @@ def apply_rebalance_pass(
             if max_c - min_c <= target_spread:
                 break
             donors = sorted(eid for eid, c in bucket_counts.items() if c == max_c)
-            recipients = sorted(eid for eid, c in bucket_counts.items() if c == min_c)
+            # Anyone at least 2 below the top can take a flight without
+            # overtaking the donor — lowest first. Only offering the
+            # exact-minimum staff stalled the bucket whenever those few
+            # had no eligible/spaced flight on offer.
+            recipients = sorted(
+                (eid for eid, c in bucket_counts.items() if c <= max_c - 2),
+                key=lambda eid: (bucket_counts[eid], eid),
+            )
 
             transferred = False
             for donor_id in donors:
@@ -149,6 +172,7 @@ def apply_rebalance_pass(
                     (
                         uid for uid, st in rstate.items()
                         if st["staff_id"] == donor_id
+                        and uid not in frozen_uids
                         and _transferable(flight_by_uid.get(uid))
                     ),
                     key=lambda u: std_to_ops_day_minutes(
@@ -166,6 +190,12 @@ def apply_rebalance_pass(
                         recipient = staff_by_id[recipient_id]
                         if counts.get(recipient_id, 0) >= hard_cap_for(recipient):
                             continue
+                        f_min = std_to_ops_day_minutes(f.std, f.date, d_day)
+                        if f_min > _max_std.get(recipient_id, 10**9):
+                            continue  # released early
+                        win = _blocked.get(recipient_id)
+                        if win is not None and win[0] <= f_min < win[1]:
+                            continue  # their break
                         f_entry = spacing_key(f, d_day)
                         if not spacing_clear(
                             f_entry, staff_stds.get(recipient_id, ()),

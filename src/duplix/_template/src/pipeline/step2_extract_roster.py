@@ -1,4 +1,4 @@
-"""Step 2 — extract roster availability (plan §10 Phase 2).
+"""Plan stage, step 2 — extract roster availability for the date.
 
 Reads the two uploaded rosters (regular staff + AM/ZC), normalises
 statuses, and stores the long-format availability matrix in
@@ -14,10 +14,10 @@ from datetime import timedelta
 from pathlib import Path
 from typing import cast
 
-from .config import Config, load_config
-from .io.readers import DuplicateEmployeeIdError
-from .io.roster_library import read_library
-from .schemas import (
+from ..config import Config, load_config
+from ..io.readers import DuplicateEmployeeIdError
+from ..io.roster_library import read_library
+from ..schemas import (
     NON_ASSIGNABLE,
     SHIFT_CODES,
     AMRosterRow,
@@ -37,7 +37,7 @@ from .schemas import (
 # central map. When a new status is added to CrewStatus, update the
 # central STATUS_TO_SHIFT and every consumer picks it up — no more
 # scattered duplicates to keep in sync.
-from .schemas import STATUS_TO_SHIFT as _STATUS_TO_SHIFT
+from ..schemas import STATUS_TO_SHIFT as _STATUS_TO_SHIFT
 
 # Status values that ALSO imply a P2F license, even if the License column
 # 2026-05-27 (centralization): the set of P2F-license-granting statuses
@@ -45,8 +45,8 @@ from .schemas import STATUS_TO_SHIFT as _STATUS_TO_SHIFT
 # so existing call sites read clearly. Add a new combined ZC+P2F or
 # plain P2F status to the central STATUS_TO_P2F_HANDLER_SHIFT map and
 # this set picks it up automatically.
-from .schemas import P2F_LICENSE_GRANTING_STATUSES as _P2F_HANDLER_STATUSES
-from .state import AppState
+from ..schemas import P2F_LICENSE_GRANTING_STATUSES as _P2F_HANDLER_STATUSES
+from ..state import AppState
 
 
 def _emit_for_window(

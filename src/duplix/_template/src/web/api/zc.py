@@ -11,7 +11,7 @@ from __future__ import annotations
 import logging
 from datetime import date as date_t
 
-from ... import zc_store
+from ...storage import zc_store
 from ...state import STATE
 from .. import runner
 from ..core.responses import Response, bad_request, conflict, json_response
@@ -50,7 +50,7 @@ def _rebuild(d_day: date_t) -> dict[str, object]:
     if not planned:
         return {"applied": False, "reason": "not planned yet"}
 
-    from ...step2_extract_roster import run as run_step2
+    from ...pipeline.step2_extract_roster import run as run_step2
 
     # step2 replaces state.warnings; the ones on screen belong to the
     # last Plan / Allocate, so put them back afterwards.

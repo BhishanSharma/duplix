@@ -298,3 +298,7 @@
     min-width: 560px;
   }
 }
+
+/* Charts and the workload review appear only after Allocate. Cells set
+   their own display, so make [hidden] win. */
+.after-allocation[hidden] { display: none !important; }

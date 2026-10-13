@@ -1,9 +1,8 @@
-"""Pydantic schemas for the flight-allocation pipeline (plan §4)."""
+"""Pydantic schemas shared by every stage of the flight-allocation pipeline."""
 
 from __future__ import annotations
 
 from datetime import date as date_t
-from datetime import datetime as datetime_t
 from datetime import time as time_t
 from enum import StrEnum
 from typing import Any, Literal, Self
@@ -317,39 +316,6 @@ STATUS_IS_P2F_HANDLER: frozenset[CrewStatus] = frozenset(
 )
 
 
-def role_implied_by_status(status: CrewStatus) -> "Role | None":
-    """Return the Role this status forces for the day, or None when
-    the status doesn't override (caller falls back to the crew row's
-    sheet-origin role). Lazy lookup of Role to dodge the forward
-    reference — Role is defined after this section."""
-    tag = _STATUS_ROLE_TAGS.get(status)
-    if tag is None:
-        return None
-    return Role(tag)
-
-
-def is_p2f_handler_status(status: CrewStatus) -> bool:
-    """True iff the status nominates the staff as a P2F handler."""
-    return status in STATUS_IS_P2F_HANDLER
-
-
-def p2f_handler_shift(status: CrewStatus) -> ShiftCode | None:
-    """Return the shift this status nominates a P2F handler for, or
-    None if the status isn't a P2F-handler status."""
-    return STATUS_TO_P2F_HANDLER_SHIFT.get(status)
-
-
-def is_zc_status(status: CrewStatus) -> bool:
-    """True iff the status implies ZC role for the day."""
-    return status in STATUS_IS_ZC
-
-
-def shift_of_status(status: CrewStatus) -> ShiftCode | None:
-    """Return the shift this status implies, or None for off-day /
-    leave / OTHER / BLANK."""
-    return STATUS_TO_SHIFT.get(status)
-
-
 # Convenience: statuses that auto-grant a P2F license (because they
 # nominate the staff as a P2F handler). step2 uses this to populate
 # the license cell so downstream eligibility (F3) treats them as
@@ -634,23 +600,6 @@ class OverrideMode(StrEnum):
     VOLUNTEER = "VOLUNTEER"
 
 
-class OverrideRow(BaseModel):
-    """Plan §4.7 — one row of the Overrides sheet."""
-
-    model_config = ConfigDict(frozen=True)
-    employee: str
-    date: date_t
-    mode: OverrideMode
-    from_shift: ShiftCode | None = None
-    to_shift: ShiftCode | None = None
-
-    @model_validator(mode="after")
-    def _check_active_modes_require_shifts(self) -> Self:
-        if self.mode != OverrideMode.NO and (self.from_shift is None or self.to_shift is None):
-            raise ValueError(f"mode={self.mode} requires both from_shift and to_shift")
-        return self
-
-
 # RequiredStaffingRow removed 2026-05-21 — the IN_Required sheet and
 # its reader are gone, no callers reference this schema anymore.
 
@@ -661,24 +610,6 @@ class Origin(StrEnum):
     SOLVER_SWAP = "SOLVER_SWAP"
 
 
-class BalancedRosterRow(BaseModel):
-    """Plan §4.10 — Step 3 output, long format.
-
-    Step 4 additions: ``employee_id`` (the join key Step 4 uses everywhere) and
-    ``license`` (passed through from AvailabilityRow).
-    """
-
-    model_config = ConfigDict(frozen=True)
-    employee_id: str
-    name: str
-    role: Role
-    date: date_t
-    assigned_shift: ShiftCode | None = None
-    origin: Origin
-    was_swapped: bool
-    license: str | None = None
-
-
 class SwapReason(StrEnum):
     RESPECT_OVERRIDE = "RESPECT_OVERRIDE"
     BALANCE_DEFICIT = "BALANCE_DEFICIT"
@@ -687,18 +618,6 @@ class SwapReason(StrEnum):
     # 24-hr rule against either D-1 history or the other target date's natural
     # shift. Distinguishes a forced-off from a true surplus removal.
     RULE_24H_CONFLICT = "RULE_24H_CONFLICT"
-
-
-class SwapLogRow(BaseModel):
-    """Plan §4.11."""
-
-    model_config = ConfigDict(frozen=True)
-    name: str
-    date: date_t
-    from_shift: str | None = None
-    to_shift: str | None = None
-    reason: SwapReason
-    timestamp_utc: datetime_t
 
 
 # Plan §4.2 shift-start times (24-hr rule uses these as IntervalVar starts).
@@ -911,64 +830,6 @@ class PerStaffOverride(BaseModel):
 # (extra flight in the right ops-class card; extra body in the
 # roster-by-shift block) BEFORE the assigner clicks Allocate.
 
-class AddFlightOverride(BaseModel):
-    """``type=add_flight`` — inject a new flight into the cleaned <class> list
-    so it enters the allocation pool.
-
-    Override columns used: flt, shift (used as STD HH:MM), dep, arr,
-    ops_class. The assigner provides every field the cleaning step
-    would have parsed from the SV portal — the engine treats this as
-    if it had appeared in IN_SVportal."""
-
-    model_config = ConfigDict(frozen=True)
-    date: date_t
-    flt: str
-    dep: str = Field(min_length=3, max_length=4)
-    arr: str = Field(min_length=3, max_length=4)
-    std: time_t
-    ops_class: OpsClass
-
-
-class RemoveFlightOverride(BaseModel):
-    """``type=remove_flight`` — pull a flight out of the allocation pool.
-
-    Matches by (flt, std) tuple — same disambiguator used elsewhere for
-    multi-leg rotations. Removed flights are dropped from
-    the cleaned <class> list at apply time."""
-
-    model_config = ConfigDict(frozen=True)
-    date: date_t
-    flt: str
-    std: time_t
-
-
-class AddStaffOverride(BaseModel):
-    """``type=add_staff`` — inject a new (synthetic) staff into
-    the availability list so they participate in this day's allocation.
-
-    Override columns used: employee (name), shift (M/A/N/M1/A1 or
-    M/ZC / A/ZC / ...), role (STAFF / AM / ZC). Engine assigns a
-    synthetic employee_id of ``ADD_<n>`` so the schema's unique-ID
-    rule isn't violated."""
-
-    model_config = ConfigDict(frozen=True)
-    date: date_t
-    name: str = Field(min_length=1, max_length=80)
-    shift: ShiftCode
-    role: Role
-
-
-class RemoveStaffOverride(BaseModel):
-    """``type=remove_staff`` — pull a staff out of today's allocation.
-
-    Semantically identical to ``type=sick`` (which already exists);
-    kept as a separate type for UI clarity. Both flip the staff's
-    ``assignable`` flag to False before Step 3 runs."""
-
-    model_config = ConfigDict(frozen=True)
-    date: date_t
-    name: str = Field(min_length=1, max_length=80)
-
 
 # ====================================================================
 # Phase R — per-flight relaxation overrides (2026-05-15)
@@ -1167,84 +1028,3 @@ class WriteAction(StrEnum):
     ROLLBACK = "ROLLBACK"
 
 
-class ApprovalStatus(StrEnum):
-    """Lifecycle state of a single ApprovalGate, persisted in SQLite.
-
-    PENDING   — preview built, awaiting human decision.
-    APPROVED  — token issued, not yet applied or expired.
-    APPLIED   — token consumed by a successful apply().
-    REJECTED  — human said no.
-    EXPIRED   — TTL elapsed before apply() was called.
-    """
-
-    PENDING = "PENDING"
-    APPROVED = "APPROVED"
-    APPLIED = "APPLIED"
-    REJECTED = "REJECTED"
-    EXPIRED = "EXPIRED"
-
-
-class AgentTraceRow(BaseModel):
-    """One row of the OUT_Agent_Trace sheet — the forensic log of every
-    agent action.
-
-    The sheet is append-only by design: ``reset_outputs`` excludes it so
-    audit history survives Plan / Allocate runs. Manual purge via a
-    separate "clear agent history" tool when the assigner explicitly
-    wants it gone.
-
-    Hash columns let an auditor confirm the pre/post state without
-    storing entire workbook snapshots inline.
-    """
-
-    model_config = ConfigDict(frozen=True)
-    timestamp: datetime_t
-    txn_id: str
-    """ULID-style identifier; ties together preview + approval + apply +
-    (optional) rollback rows for the same logical action."""
-    action_type: WriteAction
-    tool_name: str
-    """The agent tool that emitted this row (e.g. add_intl_airport,
-    update_roster_cell, mark_unavailable)."""
-    target: str
-    """Plain-English description of what was touched
-    (e.g. "configs/config.yml#international_airports", "override row 7")."""
-    pre_state_hash: str = ""
-    """SHA-256 hex digest of the affected file/sheet before the change.
-    Empty string for READ rows."""
-    post_state_hash: str = ""
-    """SHA-256 hex digest of the affected file/sheet after the change.
-    Empty string for READ and PREVIEW rows (no change yet)."""
-    approval_user: str = ""
-    """Empty for READ / PREVIEW / ROLLBACK; the human who clicked
-    Approve/Reject for the approval-bound rows."""
-    approval_timestamp: datetime_t | None = None
-    note: str = ""
-    """Free-form: rejection reason, rollback cause, plan-summary blurb, etc."""
-
-
-class AgentQueueRow(BaseModel):
-    """One row of the OUT_Agent_Queue sheet — items the agent flagged for
-    human triage via the ``flag_for_human`` tool (CONTEXT.md §2.7).
-
-    Kept separate from OUT_Agent_Trace so the assigner has a focused
-    work-list view independent of the firehose of read/write events.
-    """
-
-    model_config = ConfigDict(frozen=True)
-    timestamp: datetime_t
-    queue_id: str
-    """Stable identifier so the UI can mark rows resolved/dismissed
-    without re-keying by row index."""
-    question: str
-    """The user's original prompt that triggered the escalation."""
-    why_stuck: str
-    """The agent's own statement of why it couldn't resolve confidently."""
-    partial_evidence: str
-    """JSON-serialized snapshot of what the agent had figured out so far
-    (citations, partial findings). Read-only context for the human."""
-    confidence: Literal["HIGH", "MEDIUM", "LOW"] = "LOW"
-    status: Literal["OPEN", "RESOLVED", "DISMISSED"] = "OPEN"
-    resolved_by: str = ""
-    resolved_at: datetime_t | None = None
-    resolution_note: str = ""

@@ -1,4 +1,4 @@
-"""Eligibility matrix for Step 4 (round-3 update).
+"""Eligibility matrix: who may take which flight (the hard filters).
 
 For every (flight, staff) pair, answer one question: is this staff eligible
 to be assigned this flight, given the *hard* constraints H2, H3, H4, H11,
@@ -91,6 +91,17 @@ def _intl_handler_covers_d75_through_std(
     std_min = std_to_ops_day_minutes(flight_std, flight_date, ops_day)
     d75_min = std_min - _D75_OFFSET_MIN
     return start_min <= d75_min and std_min <= end_min
+
+
+def _override_bound_minutes(bound: time_t, shift: ShiftCode) -> int:
+    """A per-staff ``std_start`` / ``std_cutoff`` clock time in ops-day
+    minutes for someone working ``shift``. For a shift that runs past
+    midnight (N), a time well before the shift starts belongs to D+1."""
+    minutes = bound.hour * 60 + bound.minute
+    start, end = SHIFT_NOMINAL_MIN[shift]
+    if end > 24 * 60 and minutes < start - 3 * 60:
+        minutes += 24 * 60
+    return minutes
 
 
 class ExcludeReason(StrEnum):
@@ -252,10 +263,19 @@ def check(
     # in [std_start, std_cutoff] when those are set. Either bound may be
     # None, in which case the staff's normal shift bound applies for
     # that side (i.e., no extra constraint).
-    if staff.std_cutoff is not None and flight.std > staff.std_cutoff:
-        return ExcludeReason.OVERRIDE_CUTOFF
-    if staff.std_start is not None and flight.std < staff.std_start:
-        return ExcludeReason.OVERRIDE_CUTOFF
+    # Compared in ops-day minutes, so an N-shift bound like 01:00 means
+    # 01:00 on D+1 rather than 01:00 on D (a plain time comparison
+    # inverted the window for anyone working across midnight).
+    if staff.std_cutoff is not None or staff.std_start is not None:
+        std_min = std_to_ops_day_minutes(flight.std, flight.date, ctx.ops_day)
+        if staff.std_cutoff is not None and std_min > _override_bound_minutes(
+            staff.std_cutoff, staff.shift_today,
+        ):
+            return ExcludeReason.OVERRIDE_CUTOFF
+        if staff.std_start is not None and std_min < _override_bound_minutes(
+            staff.std_start, staff.shift_today,
+        ):
+            return ExcludeReason.OVERRIDE_CUTOFF
     # F8: international newbie exclusion (H12a).
     if flight.is_international and staff.is_newbie:
         return ExcludeReason.NEWBIE_INTERNATIONAL

@@ -32,12 +32,12 @@
               title="Upload today's Flight SV schedule" aria-label="Upload today's Flight SV schedule">
         Upload
       </button>
-      <input id="flight-upload-input" type="file" accept=".xlsx" hidden>
+      <input id="flight-upload-input" type="file" accept=".xlsx,.xlsm,.xls,.csv,.tsv,.txt" hidden>
       <input type="date" id="run-date"
              title="Allocation date — defaults to the server's date">
-      <button id="reset-btn" class="ghost" type="button"
-              title="Clear this session's results — uploads and overrides are kept">Reset</button>
-      <button id="plan-btn" class="ghost" type="button"
+      <button id="reset-btn" class="ghost" type="button" hidden
+              title="Clear results and today's flight schedule — rosters and overrides are kept">Reset</button>
+      <button id="plan-btn" class="ghost" type="button" hidden
               title="Clean flights + extract roster — preview before allocating">Plan</button>
       <button id="run-btn" class="primary" type="button" hidden>Allocate</button>
       <div class="export-menu" hidden>

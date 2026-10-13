@@ -169,17 +169,20 @@ def serve(
 
 
 def main(argv: list[str] | None = None) -> int:
+    """The one launcher: ``python -m src.web`` (start.bat runs it)."""
     import argparse
 
-    p = argparse.ArgumentParser(prog="flight-alloc-web")
-    p.add_argument("--host", default=DEFAULT_HOST)
-    p.add_argument("--port", type=int, default=DEFAULT_PORT)
+    p = argparse.ArgumentParser(
+        prog="flight-alloc",
+        description="Start the Flight Allocation web console.",
+    )
+    p.add_argument("--host", default=DEFAULT_HOST,
+                   help=f"bind address (default {DEFAULT_HOST})")
+    p.add_argument("--port", type=int, default=DEFAULT_PORT,
+                   help=f"bind port (default {DEFAULT_PORT})")
     p.add_argument("--no-browser", action="store_true",
                    help="do not auto-open the browser")
     args = p.parse_args(argv)
     serve(host=args.host, port=args.port, open_browser=not args.no_browser)
     return 0
 
-
-if __name__ == "__main__":
-    sys.exit(main())

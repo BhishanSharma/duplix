@@ -81,7 +81,7 @@ function rosterSlotHtml(item) {
       <div class="input-slot-actions">
         <label class="file-btn">
           ${files.length ? "Add roster" : "Choose file"}
-          <input type="file" accept=".xlsx" data-kind="${kind}" hidden>
+          <input type="file" accept=".xlsx,.xlsm,.xls,.csv,.tsv,.txt" data-kind="${kind}" hidden>
         </label>
       </div>
     </div>`;
@@ -106,7 +106,7 @@ function slotHtml(item) {
       <div class="input-slot-actions">
         <label class="file-btn">
           ${loaded ? "Replace" : "Choose file"}
-          <input type="file" accept=".xlsx" data-kind="${kind}" hidden>
+          <input type="file" accept=".xlsx,.xlsm,.xls,.csv,.tsv,.txt" data-kind="${kind}" hidden>
         </label>
         ${clearBtn}
       </div>
@@ -134,9 +134,24 @@ export function render() {
   }
 
   // Plan and Allocate need all three, whichever place they came from.
+  // Plan stays hidden until they are all in — there is nothing to plan.
   const ready = !!(payload && payload.ready);
   $("#run-btn")?.classList.toggle("needs-inputs", !ready);
-  $("#plan-btn")?.classList.toggle("needs-inputs", !ready);
+  const planBtn = $("#plan-btn");
+  if (planBtn) planBtn.hidden = !ready;
+
+  // Top-bar Upload turns green once today's schedule is in.
+  const sv = items.find((i) => i.kind === "sv_portal");
+  const uploadBtn = $("#upload-btn");
+  if (uploadBtn) {
+    const loaded = !!(sv && sv.filename);
+    uploadBtn.classList.toggle("is-loaded", loaded);
+    uploadBtn.textContent = loaded ? "✓ Uploaded" : "Upload";
+    uploadBtn.title = loaded
+      ? `Loaded ${sv.filename} — click to replace it`
+      : "Upload today's Flight SV schedule";
+    uploadBtn.setAttribute("aria-label", uploadBtn.title);
+  }
 }
 
 export async function load() {
@@ -157,16 +172,31 @@ export function groupMissingCount(name) {
   return Array.isArray(missing) ? missing.length : 0;
 }
 
-export async function uploadFile(kind, file) {
+/** Show an upload in progress: a spinning toast, and the header Upload
+ *  button disabled with a spinner (the slot itself may not be on screen
+ *  when the upload comes from the top bar). */
+function setUploading(kind, fileName, on) {
   const slot = $(`.input-slot[data-kind="${kind}"]`);
-  if (slot) slot.classList.add("uploading");
+  if (slot) slot.classList.toggle("uploading", on);
+  const btn = $("#upload-btn");
+  if (btn && kind === "sv_portal") {
+    btn.disabled = on;
+    btn.classList.toggle("is-busy", on);
+    btn.setAttribute("aria-busy", on ? "true" : "false");
+  }
+  if (on) setStatus(`Uploading ${fileName}…`, "busy");
+}
+
+export async function uploadFile(kind, file) {
+  setUploading(kind, file.name, true);
   try {
     await upload(`/api/inputs/${kind}`, file);
     await load();
+    setUploading(kind, file.name, false);
     setStatus(`Loaded ${file.name}`, "ok");
   } catch (e) {
-    toast.error(`Upload failed: ${e.message}`);
-    if (slot) slot.classList.remove("uploading");
+    setUploading(kind, file.name, false);
+    setStatus(`Upload failed: ${e.message}`, "err");
   }
 }
 

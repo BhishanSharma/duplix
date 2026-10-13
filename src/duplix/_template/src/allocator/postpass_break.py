@@ -73,6 +73,10 @@ class BreakSummary:
     n_partial: int = 0          # some conflicts swapped, some left
     n_not_found: int = 0        # no window could be cleared at all
     n_swaps: int = 0
+    #: employee_id -> (start, end) ops-day minutes of the break window
+    #: that was secured for them (clean or cleared via swaps). Later
+    #: passes must not hand them a flight inside it.
+    breaks: dict[str, tuple[int, int]] = field(default_factory=dict)
     workload_notes: dict[str, list[str]] = field(default_factory=lambda: defaultdict(list))
     log_lines: list[str] = field(default_factory=list)
 
@@ -195,8 +199,6 @@ def apply_break_pass(
         ``staff_a``. Keeps both counts, staff_stds, and rstate in sync."""
         st_a, st_b = rstate[uid_a], rstate[uid_b]
         f_a, f_b = flight_by_uid[uid_a], flight_by_uid[uid_b]
-        std_a = std_to_ops_day_minutes(f_a.std, f_a.date, d_day)
-        std_b = std_to_ops_day_minutes(f_b.std, f_b.date, d_day)
         recip_a = staff_by_id[staff_b]  # receives uid_a
         recip_b = staff_by_id[staff_a]  # receives uid_b
 
@@ -351,6 +353,8 @@ def apply_break_pass(
                     f"{_fmt(win_start)}-{_fmt(win_end)} still has "
                     f"{len(unresolved)} flight(s)",
                 )
+
+    summary.breaks = dict(assigned_break)
 
     # Rebuild the rows list from rstate (AllocationRow is frozen).
     new_rows: list[AllocationRow] = []

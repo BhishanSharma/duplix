@@ -47,10 +47,10 @@ def test_solver_time_limit_is_positive():
     assert load_yaml()["solver"]["max_seconds"] > 0
 
 
-def test_config_shifts_match_window_tables():
+def test_window_tables_cover_every_shift():
     from src.allocator.windows import SHIFT_NOMINAL_MIN
 
-    assert set(load_yaml()["status"]["shifts"]) == set(SHIFT_NOMINAL_MIN) == SHIFTS
+    assert set(SHIFT_NOMINAL_MIN) == SHIFTS
 
 
 def test_gulf_drop_and_classification_lists_agree():

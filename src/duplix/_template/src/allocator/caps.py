@@ -461,39 +461,6 @@ def preferred_target_for_shift_role(shift: str, role: Role) -> int:
 # We expose them as live views over the active values so callers don't
 # need to update — but new code should prefer the helper functions above.
 
-def _build_legacy_view(group: str) -> dict[tuple[Role, str], int]:
-    """``group`` is one of ``"min"`` / ``"target"`` / ``"max"``. Returns
-    a ``(Role, "day"|"night")`` dict where "day" merges M/A/M1/A1 (we
-    use M's values as the representative — they're the same in defaults)
-    and "night" maps from N."""
-    def day_for(role: Role, key: str) -> int:
-        band = get_band("M", role)
-        return band[key] if band else 0
-    def night_for(role: Role, key: str) -> int:
-        band = get_band("N", role)
-        return band[key] if band else 0
-    return {
-        (Role.STAFF, "day"):   day_for(Role.STAFF, group),
-        (Role.STAFF, "night"): night_for(Role.STAFF, group),
-        (Role.ZC,    "day"):   day_for(Role.ZC, group),
-        (Role.ZC,    "night"): night_for(Role.ZC, group),
-    }
-
-
-def __getattr__(name: str):  # pragma: no cover — module-level dynamic attr
-    """Module-level ``__getattr__`` so the legacy names
-    ``H16_HARD_CAPS`` / ``S1_PREFERRED_TARGETS`` / ``S1_ACCEPTABLE_MAX``
-    still resolve to live dicts. Existing code that did ``from .caps
-    import H16_HARD_CAPS`` keeps working without each call site having
-    to migrate to the new helper functions in one pass."""
-    if name == "H16_HARD_CAPS":
-        return _build_legacy_view("max")
-    if name == "S1_PREFERRED_TARGETS":
-        return _build_legacy_view("min")
-    if name == "S1_ACCEPTABLE_MAX":
-        return _build_legacy_view("target")
-    raise AttributeError(name)
-
 
 __all__ = [
     "acceptable_max_for",

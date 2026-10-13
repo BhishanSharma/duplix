@@ -100,9 +100,9 @@ export async function triggerPlan() {
 export async function triggerReset() {
   const ok = await confirmModal(
     "Reset results",
-    "Clears the allocation, workload summary, pairs, unallocated list "
-    + "and warnings from this session. Your uploaded files and override "
-    + "rows are kept, so you can go straight back to Plan / Allocate.",
+    "Clears the allocation, workload summary, pairs, unallocated list, "
+    + "warnings and today's flight schedule. The saved rosters and your "
+    + "override rows are kept — upload the schedule again to start over.",
     "Reset",
   );
   if (!ok) return;

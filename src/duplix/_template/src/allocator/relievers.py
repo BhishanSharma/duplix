@@ -152,8 +152,6 @@ def plan_relief(
         f = flight_by_uid.get(uid)
         if f is not None:
             keys[r.staff_employee_id][uid] = spacing_key(f, d_day)
-    moved_names: dict[str, str] = {}
-
     def f_min(uid: str) -> int:
         f = flight_by_uid[uid]
         return std_to_ops_day_minutes(f.std, f.date, d_day)

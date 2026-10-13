@@ -1,4 +1,4 @@
-"""Step 1 — clean SV portal flights (plan §10 Phase 1).
+"""Plan stage, step 1 — clean the SV portal flight schedule.
 
 Reads the uploaded flight schedule and groups the surviving rows by
 OpsClass into ``state.cleaned``.
@@ -44,10 +44,10 @@ from datetime import date as date_type
 from datetime import time, timedelta
 from pathlib import Path
 
-from .config import Config, load_config
-from .io.readers import read_sv_portal, workbook_from_bytes
-from .schemas import CleanFlightRow, OpsClass, RawFlightRow
-from .state import AppState
+from ..config import Config, load_config
+from ..io.readers import read_sv_portal, workbook_from_bytes
+from ..schemas import CleanFlightRow, OpsClass, RawFlightRow
+from ..state import AppState
 
 CUTOFF: time = time(5, 5)
 # Phase 3 / Change 7: D+1 flights with STD in [CUTOFF, DEFERRED_UPPER]

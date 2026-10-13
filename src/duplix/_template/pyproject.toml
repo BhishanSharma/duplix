@@ -8,10 +8,11 @@ dependencies = [
     "pydantic~=2.7",
     "ortools~=9.15",
     "pyyaml~=6.0",
+    "xlrd~=2.0",
 ]
 
 [project.scripts]
-flight-alloc = "src.cli:main"
+flight-alloc = "src.web.server:main"
 
 [build-system]
 requires = ["setuptools>=68"]

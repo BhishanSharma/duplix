@@ -31,8 +31,11 @@ export function setPostPlanUI(planHasRun, allocationReady = false) {
     $("#handlers-block").hidden = true;
   }
   const runBtn = $("#run-btn");
+  const resetBtn = $("#reset-btn");
   const exportMenu = $(".export-menu");
   if (runBtn) runBtn.hidden = !planHasRun;
+  // Reset clears results — nothing to clear before Plan has run.
+  if (resetBtn) resetBtn.hidden = !planHasRun;
   // Download only once there is an allocation to download — Plan alone
   // produces nothing to export.
   if (exportMenu) {

@@ -12,6 +12,7 @@ from datetime import date as date_t
 from datetime import datetime
 from typing import Any
 
+from ...config import load_config
 from ...state import (
     DAILY_INPUT_KINDS,
     OVERRIDE_HEADERS,
@@ -19,7 +20,7 @@ from ...state import (
     SETUP_INPUT_KINDS,
     AppState,
 )
-from .common import SHIFTS, is_live, run_date_iso
+from .common import CONFIG_PATH, SHIFTS, is_live, run_date_iso
 
 
 
@@ -98,23 +99,33 @@ def read_sv_portal_columns(state: AppState) -> dict[str, Any]:
     except Exception as exc:  # noqa: BLE001 — degrade to free-text input
         print(f"  sv_portal headers unreadable: {type(exc).__name__}: {exc}")
         return {"headers": [], "samples": {}}
+    from ...io.readers import SHEET_IN_SVPORTAL, find_sv_header, pick_sheet
+
     try:
         if not wb.sheetnames:
             return {"headers": [], "samples": {}}
-        ws = wb[wb.sheetnames[0]]
-        first_row = next(ws.iter_rows(min_row=1, max_row=1, values_only=True), None)
-        if first_row is None:
+        ws = pick_sheet(wb, SHEET_IN_SVPORTAL)
+        top = [list(r) for _, r in zip(range(16), ws.iter_rows(values_only=True))]
+        if not top:
             return {"headers": [], "samples": {}}
-        headers = [
-            str(h).strip() for h in first_row
+        # Same header row the flight reader uses (it may sit below a
+        # title banner). Keep each header's own column index so a blank
+        # header cell does not shift every later column.
+        cfg = load_config(CONFIG_PATH).io.sv_portal
+        header_idx, _ = find_sv_header(top, cfg.columns)
+        cols = [
+            (i, str(h).strip()) for i, h in enumerate(top[header_idx])
             if h is not None and str(h).strip()
         ]
+        headers = [h for _, h in cols]
         samples: dict[str, list[str]] = {h: [] for h in headers}
         seen: dict[str, set[str]] = {h: set() for h in headers}
-        for n, row in enumerate(ws.iter_rows(min_row=2, values_only=True)):
+        for n, row in enumerate(
+            ws.iter_rows(min_row=header_idx + 2, values_only=True),
+        ):
             if n >= 5000:
                 break
-            for i, header in enumerate(headers):
+            for i, header in cols:
                 if i >= len(row) or row[i] is None:
                     continue
                 v = str(row[i]).strip()

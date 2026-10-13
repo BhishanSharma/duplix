@@ -1,8 +1,7 @@
-"""Load and validate ``configs/config.yml`` (plan §1.5.1)."""
+"""Load and validate ``configs/config.yml``."""
 
 from __future__ import annotations
 
-from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -23,13 +22,14 @@ class _Frozen(BaseModel):
 
 
 class AllocationConfig(_Frozen):
-    cycle_year: int
-    default_date: date
+    # Optional override for year-less roster headers ("Mon,30Mar"). Leave
+    # unset: the reader works the year out (banner text, weekday, the
+    # file's date, today) — a fixed year here goes stale every January.
+    cycle_year: int | None = None
 
 
 class SolverConfig(_Frozen):
     max_seconds: int
-    deficit_penalty_lambda: int
     # CPU cores handed to CP-SAT for parallel portfolio search. 0 (default)
     # means "auto": use every available core, capped at 8 (see
     # solver/allocator_cpsat.py — OR-Tools' own guidance is that portfolio
@@ -38,15 +38,9 @@ class SolverConfig(_Frozen):
     num_workers: int = 0
 
 
-class StateConfig(_Frozen):
-    staleness_max_days: int
-
-
 class SVPortalConfig(_Frozen):
-    sheet: str
     columns: dict[str, str]
     date_format: str
-    pax_regex: str
     # Phase 3 / Change 1 (2026-05-14, INTL overhaul): flights with
     # ``DEP ∈ routing_drop_dep_codes`` are dropped at Step 1 extraction.
     # ARR-side highlighting was removed in the same amendment — Gulf-3
@@ -58,14 +52,11 @@ class SVPortalConfig(_Frozen):
 
 
 class StaffRosterConfig(_Frozen):
-    sheet: str
     name_column: str
     date_header_format: str
-    skip_blank_columns: bool
 
 
 class AMRosterConfig(_Frozen):
-    sheet_glob: str
     name_column: str
     date_header_format: str
     subheader_rows_to_skip: int
@@ -79,11 +70,8 @@ class IOConfig(_Frozen):
 
 class StatusConfig(_Frozen):
     aliases: dict[str, str]
-    shifts: list[str]
-    non_shift_recognized: list[str]
     am_shifts: list[str]
     zc_shifts: list[str]
-    unrecognized_treatment: str
 
 
 class P2FAdjustmentConfig(_Frozen):
@@ -144,7 +132,7 @@ class ZCCutoffConfig(_Frozen):
 
 
 class Config(_Frozen):
-    allocation: AllocationConfig
+    allocation: AllocationConfig = AllocationConfig()
     # Task 2a (2026-05-12): required_staffing removed. The per-shift
     # "people needed" baseline is now derived at display time from the
     # current preferred targets and the day's flight count
@@ -152,7 +140,6 @@ class Config(_Frozen):
     # per-(shift, role) preferred / acceptable / cap live in
     # configs/shift_limits.json — see allocator/caps.py.
     solver: SolverConfig
-    state: StateConfig
     io: IOConfig
     status: StatusConfig
     ops_class_by_aircraft_type: dict[str, str] = {}

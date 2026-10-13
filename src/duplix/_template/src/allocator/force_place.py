@@ -29,7 +29,7 @@ from dataclasses import dataclass, field
 from datetime import date as date_t
 
 from ..schemas import FlightInput, OpsClass, Role, StaffMember
-from .caps import hard_cap_for
+from .caps import hard_cap_for, preferred_target_for
 from .eligibility import EligibilityContext, check as elig_check
 from .windows import (
     is_in_std_window,
@@ -128,9 +128,10 @@ def force_place_remaining(
         if f is None:
             continue
         mine[eid].append((f, spacing_key(f, ops_day)))
-        if f.ops_class != OpsClass.P2F:
-            count[eid] += 1
+        # P2F flights count toward the cap, exactly as in the solver's H16.
+        count[eid] += 1
     caps = {s.employee_id: hard_cap_for(s) for s in pool}
+    targets = {s.employee_id: preferred_target_for(s) for s in pool}
 
     # P2F first (they have the fewest options), then the hardest-to-place
     # INTL, then chronological.
@@ -157,7 +158,11 @@ def force_place_remaining(
             )
             cap = caps.get(s.employee_id, 0)
             over = max(0, count[s.employee_id] + 1 - cap)
-            rank = (tier, late, over, shortfall, count[s.employee_id], s.employee_id)
+            # Load is judged against the person's own target (ZC ~14,
+            # N ~19, STAFF ~22), not the raw count — otherwise ZCs and
+            # N staff always look "least loaded" next to day STAFF.
+            load = count[s.employee_id] - targets[s.employee_id]
+            rank = (tier, late, over, shortfall, load, s.employee_id)
             if best is None or rank < best[0]:
                 best = (rank, s, tier, over, shortfall, why_space, cap)
         assert best is not None
@@ -176,6 +181,5 @@ def force_place_remaining(
 
         key = spacing_key(f, ops_day)
         mine[s.employee_id].append((f, key))
-        if f.ops_class != OpsClass.P2F:
-            count[s.employee_id] += 1
+        count[s.employee_id] += 1
     return out

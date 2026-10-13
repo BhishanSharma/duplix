@@ -45,7 +45,6 @@ from ..schemas import FlightInput, StaffMember
 from .caps import hard_cap_for
 from .eligibility import (
     EligibilityContext,
-    ExcludeReason,
     check as elig_check,
 )
 from .windows import (

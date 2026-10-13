@@ -1,4 +1,4 @@
-"""Step 4 allocator — pre-solve matrix construction, pair generation, and
+"""Allocator building blocks — pre-solve matrix construction, pair generation, and
 post-solve assembly.
 
 The CP-SAT model itself lives in ``src.solver.allocator_cpsat``;

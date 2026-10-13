@@ -1,5 +1,13 @@
+# Python
 .venv/
 __pycache__/
 *.pyc
-excel/
+*.egg-info/
+.pytest_cache/
+
+# Local data: saved rosters, ZC lists, relief history
 data/
+excel/
+
+# Written by the Setup sidebar when shift hours are changed (local)
+configs/shift_times.json

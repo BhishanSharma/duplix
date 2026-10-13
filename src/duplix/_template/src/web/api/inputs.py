@@ -21,6 +21,7 @@ from datetime import date as date_t
 
 from ...config import load_config
 from ...io.roster_library import roster_dates
+from ...io.upload_formats import ACCEPTED_TYPES, UnreadableUpload, to_xlsx_bytes
 from ...state import INPUT_KINDS, SETUP_INPUT_KINDS, STATE
 from .. import readback
 from ..readback.common import CONFIG_PATH
@@ -42,18 +43,23 @@ def register(router: Router) -> None:
         data = req.body
         if not data:
             return bad_request("empty upload")
-        # An .xlsx is a zip; anything else would blow up deep inside
-        # openpyxl on the next run, so reject it at the door.
-        if not data.startswith(b"PK"):
-            return bad_request(
-                "that doesn't look like an .xlsx file — re-save it as "
-                "Excel Workbook (.xlsx) and upload again"
-            )
         filename = urllib.parse.unquote(
             req.header("X-Filename") or f"{kind}.xlsx"
         )
+        # Whatever was sent (.xlsx/.xlsm, old .xls, an HTML or text
+        # "Excel export", CSV/TSV) is recognised by content and kept as a
+        # real .xlsx, so every reader and the roster store see one format.
+        try:
+            data = to_xlsx_bytes(data)
+        except UnreadableUpload as exc:
+            return bad_request(
+                f"could not read {filename}: {exc}. Accepted: {ACCEPTED_TYPES}"
+            )
         if kind in SETUP_INPUT_KINDS:
             return _upload_roster(kind, filename, data)
+        problem = _check_flight_schedule(data)
+        if problem:
+            return bad_request(f"{filename}: {problem}")
         up = STATE.set_input(kind, filename, data)
         logger.info("[upload] %s: %s (%.0f KB)", kind, up.filename, len(data) / 1024)
         return json_response({
@@ -91,6 +97,46 @@ def register(router: Router) -> None:
         return json_response(STATE.roster_coverage(day))
 
 
+def _check_flight_schedule(data: bytes) -> str | None:
+    """Why the flight schedule cannot be used, or None when it can.
+
+    Finds the header row and the columns the engine needs (tolerating
+    relabels — see ``io.readers.find_sv_header``), so a wrong or
+    reshaped file is refused at upload rather than at Plan time."""
+    from ...io.readers import (
+        SHEET_IN_SVPORTAL,
+        SV_REQUIRED_FIELDS,
+        find_sv_header,
+        pick_sheet,
+    )
+    from ...io.upload_formats import to_workbook
+    cfg = load_config(CONFIG_PATH).io.sv_portal
+    # Only the first rows are needed: open lazily instead of parsing the
+    # whole schedule (~2 s on a 2,000-flight export).
+    wb = to_workbook(data, read_only=True)
+    try:
+        ws = pick_sheet(wb, SHEET_IN_SVPORTAL)
+        rows = [list(r) for _, r in zip(range(16), ws.iter_rows(values_only=True))]
+    finally:
+        wb.close()
+    if not rows:
+        return "the sheet is empty"
+    _, found = find_sv_header(rows, cfg.columns)
+    missing = [f for f in SV_REQUIRED_FIELDS if f not in found]
+    if not missing:
+        return None
+    labels = {
+        "flight_id": "flight number (FLT)", "departure": "departure (DEP)",
+        "arrival": "arrival (ARR)", "dep_time": "departure time (STD)",
+        "date": "date (DATE)",
+    }
+    return (
+        "no column found for " + ", ".join(labels[f] for f in missing)
+        + ". Check the header row, or add the column's name under "
+        "io.sv_portal.columns in configs/config.yml."
+    )
+
+
 def _upload_roster(kind: str, filename: str, data: bytes) -> Response:
     """Validate a period roster at the door, then keep it.
 
@@ -105,8 +151,9 @@ def _upload_roster(kind: str, filename: str, data: bytes) -> Response:
         return bad_request(f"could not read {filename}: {exc}")
     if not dates:
         return bad_request(
-            f"{filename} has no date columns (expected headers like "
-            "'Mon,31Aug'). Is this the right file?"
+            f"{filename} has no date columns (expected day headers like "
+            "'Mon,31Aug', '31-Aug', '31 Aug' or '31/08'). Is this the "
+            "right file?"
         )
     rf = STATE.add_roster(kind, filename, data, dates)
     logger.info(

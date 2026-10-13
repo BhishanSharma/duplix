@@ -18,14 +18,12 @@ this module.
 
 from __future__ import annotations
 
-import io
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from datetime import date as date_type
-from datetime import datetime, time
+from datetime import datetime, time, timedelta
 from typing import Any
 
-import openpyxl
 from openpyxl import Workbook
 from openpyxl.worksheet.worksheet import Worksheet
 
@@ -52,8 +50,23 @@ SHEET_IN_AM_ROSTER = "IN_AM_Roster"
 
 
 def workbook_from_bytes(data: bytes) -> Workbook:
-    """Open an uploaded .xlsx payload as a read-only-ish workbook."""
-    return openpyxl.load_workbook(io.BytesIO(data), data_only=True)
+    """Open an uploaded payload as a workbook. Accepts .xlsx/.xlsm, old
+    binary .xls, HTML-table "xls" exports and CSV/TSV text — see
+    ``upload_formats``."""
+    from .upload_formats import to_workbook
+    return to_workbook(data)
+
+
+def norm_header(value: Any) -> str:
+    """A header label reduced to what matters: lower case, punctuation
+    and repeated spaces dropped. 'Flight No.', 'FLIGHT_NO' and
+    ' flight  no ' all become 'flight no' — so a minor relabel in an
+    export does not lose the column."""
+    if value is None:
+        return ""
+    s = str(value).strip().lower()
+    s = re.sub(r"[._\-/:()\[\]#,]+", " ", s)
+    return " ".join(s.split())
 
 
 def pick_sheet(wb: Workbook, preferred: str) -> Worksheet:
@@ -116,11 +129,20 @@ def _parse_date(v: Any, fmt: str) -> date_type | None:
         return v.date()
     if isinstance(v, date_type):
         return v
+    if isinstance(v, (int, float)) and not isinstance(v, bool):
+        # Excel date serial (days since 1899-12-30), e.g. from a CSV.
+        if 20000 < float(v) < 80000:
+            return (datetime(1899, 12, 30) + timedelta(days=int(v))).date()
+        raise TypeError(f"unsupported date value: {v!r}")
     if not isinstance(v, str):
         raise TypeError(f"unsupported date value: {v!r} ({type(v).__name__})")
     s = v.strip()
     if not s:
         return None
+    # A date with a time part ('2026-09-26 00:00:00', '26/09/2026 05:05')
+    # is still a date.
+    if " " in s and ":" in s.split(" ", 1)[1]:
+        s = s.split(" ", 1)[0]
     # Configured format first, then the fallback list.
     for candidate in (fmt, *_DATE_FORMAT_FALLBACKS):
         try:
@@ -133,16 +155,35 @@ def _parse_date(v: Any, fmt: str) -> date_type | None:
     )
 
 
+_TIME_FORMATS: tuple[str, ...] = (
+    "%H:%M", "%H:%M:%S", "%H.%M", "%H%M", "%I:%M %p", "%I:%M%p",
+    "%I:%M:%S %p", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%d/%m/%Y %H:%M",
+    "%m/%d/%Y %H:%M", "%d-%m-%Y %H:%M",
+)
+
+
 def _parse_time(v: Any) -> time | None:
+    """A cell to a time of day. Besides real time cells and 'HH:MM',
+    accepts '05:05:00', '05.05', '0505' / '505', '5:05 AM', a date+time
+    string, and Excel's numeric time (a fraction of a day)."""
     if v is None:
         return None
     if isinstance(v, time):
         return v
     if isinstance(v, datetime):
         return v.time()
+    if isinstance(v, (int, float)) and not isinstance(v, bool):
+        frac = float(v) % 1
+        if float(v) >= 1 and frac == 0 and float(v) < 2400:
+            v = f"{int(v):04d}"           # 505 / 1325 read as a number
+        else:
+            minutes = round(frac * 24 * 60) % (24 * 60)
+            return time(minutes // 60, minutes % 60)
     if isinstance(v, str):
-        s = v.strip()
-        for fmt in ("%H:%M", "%H:%M:%S"):
+        s = v.strip().upper().replace("HRS", "").replace("H", ":").strip()
+        if s.isdigit() and len(s) in (3, 4):
+            s = s.zfill(4)
+        for fmt in _TIME_FORMATS:
             try:
                 return datetime.strptime(s, fmt).time()
             except ValueError:
@@ -192,25 +233,6 @@ def normalize_status(raw: Any, status_cfg: StatusConfig) -> tuple[CrewStatus, st
     return CrewStatus.OTHER, literal
 
 
-def _parse_date_header(value: Any, fmt: str, cycle_year: int) -> date_type | None:
-    """Parse a wide-roster column header to a date. Accepts:
-      - datetime / date cells (real Excel date types)            → returned as-is
-      - strings matching the configured ``fmt`` (e.g. 'Mon,30Mar') → parsed
-      - other types / unmatched strings                          → None (column ignored)
-    """
-    if isinstance(value, datetime):
-        return value.date()
-    if isinstance(value, date_type):
-        return value
-    if not isinstance(value, str):
-        return None
-    try:
-        parsed = datetime.strptime(value.strip(), fmt)
-    except ValueError:
-        return None
-    return parsed.replace(year=cycle_year).date()
-
-
 _SHIFT_CODES_TUPLE: tuple[str, ...] = ("M", "A", "N", "M1", "A1")
 
 
@@ -223,86 +245,173 @@ def _coerce_shift(v: Any) -> ShiftCode | None:
     return None
 
 
-def _coerce_date(v: Any) -> date_type | None:
-    if v is None:
-        return None
-    if isinstance(v, datetime):
-        return v.date()
-    if isinstance(v, date_type):
-        return v
-    if isinstance(v, str):
-        s = v.strip()
-        if not s:
-            return None
-        for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%d/%m/%Y"):
-            try:
-                return datetime.strptime(s, fmt).date()
-            except ValueError:
-                continue
-    return None
-
-
-def _coerce_bool(v: Any) -> bool:
-    if isinstance(v, bool):
-        return v
-    if isinstance(v, str):
-        return v.strip().upper() in ("YES", "Y", "TRUE", "1")
-    if isinstance(v, (int, float)):
-        return bool(v)
-    return False
-
-
-def _coerce_role(v: Any) -> Role:
-    s = str(v).strip().upper()
-    return Role(s) if s in (r.value for r in Role) else Role.STAFF
-
-
 # ---------- IN_SVportal ----------
 
-def read_sv_portal(wb: Workbook, config: Config) -> list[RawFlightRow]:
-    """Read IN_SVportal. Column rename map still comes from config.io.sv_portal.columns.
+# Built-in header aliases (2026-10-10). Matched after ``norm_header``, so
+# case, dots, underscores, brackets and spacing do not matter. Names in
+# config.yml ``io.sv_portal.columns`` always take precedence; these only
+# catch the usual relabels of an export so a minor format change does not
+# silently lose a column.
+_SV_ALIASES: dict[str, tuple[str, ...]] = {
+    "flight_id": (
+        "flt", "flight", "flight no", "flight number", "flt no", "fltno",
+        "flight num", "flight nbr",
+    ),
+    "departure": (
+        "dep", "origin", "from", "departure", "dep stn", "dep station",
+        "departure station", "board point", "sector from",
+    ),
+    "arrival": (
+        "arr", "dest", "destination", "to", "arrival", "arr stn",
+        "arr station", "arrival station", "off point", "sector to",
+    ),
+    "dep_time": (
+        "std", "dep", "std lt", "std local", "dep time", "departure time",
+        "sched dep", "scheduled departure", "std time",
+    ),
+    "arr_time": ("sta", "sta lt", "arr time", "arrival time", "scheduled arrival"),
+    "date": ("date", "flight date", "flt date", "dep date", "departure date", "flt dt"),
+    "booked_pax_raw": ("load", "booked pax", "pax load", "pax", "booked"),
+    "aircraft_type": ("type", "flt type", "flight type"),
+    "aircraft_subtype": ("a c type", "ac type", "aircraft", "ac", "equipment"),
+    "owner": ("aircraft owner", "owner", "operator"),
+}
+# 'dep' is both the old DEP (station) header and the short form of
+# "Dep." (time) in the new export; the config map settles which one a
+# given file means, so it is left out of the dep_time aliases below.
+_SV_ALIASES["dep_time"] = tuple(a for a in _SV_ALIASES["dep_time"] if a != "dep")
 
-    2026-05-25: also stash every cell into ``extra_columns`` keyed by
-    its literal header string, so the extraction-filter system can
-    match on arbitrary columns (REG, Crew, MEMO, etc.) that aren't
-    part of the canonical RawFlightRow schema.
+#: Columns the engine cannot work without.
+SV_REQUIRED_FIELDS: tuple[str, ...] = (
+    "flight_id", "departure", "arrival", "dep_time", "date",
+)
+_SV_FIELD_LABEL = {
+    "flight_id": "flight number", "departure": "departure station",
+    "arrival": "arrival station", "dep_time": "departure time (STD)",
+    "date": "date",
+}
+
+
+def _sv_column_map(
+    header: Sequence[Any], config_columns: Mapping[str, str],
+) -> dict[str, int]:
+    """field -> column index for one candidate header row.
+
+    Each header is matched in tiers, strictest first: the exact config
+    name, the config name ignoring case, the config name ignoring case
+    and punctuation (only when that points at a single field — config
+    has both 'DEP' = station and 'Dep.' = time), then the built-in
+    aliases. A field keeps its strictest, then left-most, match."""
+    exact = dict(config_columns)
+    lower = {k.strip().lower(): v for k, v in config_columns.items()}
+    by_norm: dict[str, set[str]] = {}
+    for k, v in config_columns.items():
+        by_norm.setdefault(norm_header(k), set()).add(v)
+    alias_norm = {a: f for f, names in _SV_ALIASES.items() for a in names}
+    best: dict[str, tuple[int, int]] = {}   # field -> (tier, column)
+    for i, h in enumerate(header):
+        if h is None:
+            continue
+        raw = str(h).strip()
+        key = norm_header(raw)
+        if not key:
+            continue
+        hit: tuple[int, str] | None = None
+        if raw in exact:
+            hit = (0, exact[raw])
+        elif raw.lower() in lower:
+            hit = (1, lower[raw.lower()])
+        elif len(by_norm.get(key, ())) == 1:
+            hit = (2, next(iter(by_norm[key])))
+        elif key in alias_norm and key not in by_norm:
+            hit = (3, alias_norm[key])
+        if hit is None:
+            continue
+        tier, field_name = hit
+        if field_name not in best or tier < best[field_name][0]:
+            best[field_name] = (tier, i)
+    return {f: col for f, (_tier, col) in best.items()}
+
+
+def find_sv_header(
+    rows: Sequence[Sequence[Any]], config_columns: Mapping[str, str],
+) -> tuple[int, dict[str, int]]:
+    """(header row index, field -> column) — the row within the first
+    ``_HEADER_SCAN_ROWS`` that names the most known columns, so a title
+    banner or blank lines above the header are skipped."""
+    best = (0, _sv_column_map(rows[0], config_columns) if rows else {})
+    for i, row in enumerate(rows[:_HEADER_SCAN_ROWS]):
+        found = _sv_column_map(row, config_columns)
+        if len(found) > len(best[1]):
+            best = (i, found)
+    return best
+
+
+def read_sv_portal(wb: Workbook, config: Config) -> list[RawFlightRow]:
+    """Read the flight schedule (SV portal export).
+
+    Tolerant of minor format changes (2026-10-10): the header row is
+    found within the first rows, header labels are matched ignoring case
+    and punctuation, and common relabels are recognised (see
+    ``_SV_ALIASES``); config ``io.sv_portal.columns`` still wins. A file
+    missing a column the engine needs is refused with the list of what
+    is missing instead of silently dropping every flight.
+
+    Every cell is also kept in ``extra_columns`` under its literal header
+    so the extraction filters can match on any column (REG, Crew, ...).
     """
     cfg = config.io.sv_portal
     ws = pick_sheet(wb, SHEET_IN_SVPORTAL)
-    rows_iter = ws.iter_rows(values_only=True)
-    header_row = next(rows_iter)
-    idx_by_field: dict[str, int] = {}
-    header_by_idx: dict[int, str] = {}
-    for i, h in enumerate(header_row):
-        if isinstance(h, str):
-            header_by_idx[i] = h
-            if h in cfg.columns:
-                idx_by_field[cfg.columns[h]] = i
+    all_rows = [list(r) for r in ws.iter_rows(values_only=True)]
+    if not all_rows:
+        raise ValueError("the flight schedule sheet is empty")
+    header_idx, idx_by_field = find_sv_header(all_rows, cfg.columns)
+    missing = [f for f in SV_REQUIRED_FIELDS if f not in idx_by_field]
+    if missing:
+        seen = [str(h).strip() for h in all_rows[header_idx] if h not in (None, "")]
+        raise ValueError(
+            "the flight schedule is missing "
+            + ", ".join(_SV_FIELD_LABEL[f] for f in missing)
+            + f" (headers found: {', '.join(seen[:25]) or 'none'}). "
+            "Rename the column, or add its name under io.sv_portal.columns "
+            "in configs/config.yml."
+        )
+    header_row = all_rows[header_idx]
+    header_by_idx: dict[int, str] = {
+        i: str(h).strip() for i, h in enumerate(header_row)
+        if h is not None and str(h).strip()
+    }
 
     out: list[RawFlightRow] = []
-    for row in rows_iter:
-        if not any(c is not None for c in row):
+    for row in all_rows[header_idx + 1:]:
+        if not any(c not in (None, "") for c in row):
             continue
         kwargs: dict[str, Any] = {}
         for field_name, idx in idx_by_field.items():
-            value = row[idx]
-            if value is None:
+            value = row[idx] if idx < len(row) else None
+            if value is None or (isinstance(value, str) and not value.strip()):
                 continue
-            if field_name == "date":
-                kwargs[field_name] = _parse_date(value, cfg.date_format)
-            elif field_name in ("dep_time", "arr_time"):
-                kwargs[field_name] = _parse_time(value)
-            else:
-                kwargs[field_name] = value
-        # Capture every cell for extraction-filter custom_header matching.
+            try:
+                if field_name == "date":
+                    kwargs[field_name] = _parse_date(value, cfg.date_format)
+                elif field_name in ("dep_time", "arr_time"):
+                    kwargs[field_name] = _parse_time(value)
+                elif isinstance(value, str):
+                    kwargs[field_name] = value.strip()
+                elif isinstance(value, float) and value.is_integer():
+                    # Excel keeps numbers as floats: FLT 1 arrives as 1.0
+                    # and used to surface as "1.0" everywhere downstream.
+                    kwargs[field_name] = int(value)
+                else:
+                    kwargs[field_name] = value
+            except (ValueError, TypeError):
+                # One odd cell (a note, a "TBA" time) skips that value;
+                # Step 1 drops the row if it was the date or STD.
+                continue
         extra: dict[str, str] = {}
         for idx, header in header_by_idx.items():
-            if idx >= len(row):
-                continue
-            v = row[idx]
-            if v is None:
-                continue
-            extra[header] = str(v).strip()
+            if idx < len(row) and row[idx] is not None:
+                extra[header] = str(row[idx]).strip()
         kwargs["extra_columns"] = extra
         out.append(RawFlightRow.model_validate(kwargs))
     return out
@@ -390,13 +499,21 @@ class MissingEmployeeIdError(ValueError):
 # and (b) accept the names that file uses for each column. Every alias
 # list is matched case-insensitively and the configured name always wins.
 
-_NAME_ALIASES: tuple[str, ...] = ("Name", "STAFF NAME", "Staff Name", "Employee Name")
+# Matched with ``norm_header`` — case, dots, underscores and spacing do
+# not matter ('IGA No.' == 'iga_no' == 'IGA  NO').
+_NAME_ALIASES: tuple[str, ...] = (
+    "Name", "STAFF NAME", "Employee Name", "Crew Name", "Full Name",
+    "Name of Staff", "Name of Employee", "Agent Name",
+)
 _ID_ALIASES: tuple[str, ...] = (
-    "ID", "Employee_ID", "employee_id", "EmployeeID", "IGA", "IGA No",
-    "IGA No.", "IGA ID", "IGA Number", "Emp ID", "Emp. ID",
+    "ID", "Employee_ID", "EmployeeID", "Employee ID", "IGA", "IGA No",
+    "IGA ID", "IGA Number", "IGA Code", "Emp ID", "Emp No", "Emp Code",
+    "Employee No", "Employee Number", "Employee Code", "Staff ID",
+    "Staff No", "Staff Code",
 )
 _LICENSE_ALIASES: tuple[str, ...] = (
-    "License", "Licence", "add info", "Additional Info", "Add. Info",
+    "License", "Licence", "add info", "Additional Info", "Addl Info",
+    "Licence Type", "License Type", "Licenses", "Licences",
 )
 
 # Rows above the header (a title banner, a blank spacer) are skipped;
@@ -425,10 +542,10 @@ def _find_header_row(
     """Index of the first row (within the scan window) that has a
     name-column label in it; 0 when none does, so the caller's existing
     'name column not in header' error still fires with the first row."""
-    wanted = {n.strip().lower() for n in name_candidates}
+    wanted = {norm_header(n) for n in name_candidates}
     for i, row in enumerate(rows[:_HEADER_SCAN_ROWS]):
         for cell in row:
-            if isinstance(cell, str) and cell.strip().lower() in wanted:
+            if isinstance(cell, str) and norm_header(cell) in wanted:
                 return i
     return 0
 
@@ -483,6 +600,7 @@ def _resolve_date_columns(
     Real Excel date cells are taken as they are.
     """
     has_weekday = "%a" in fmt or "%A" in fmt
+    month_first = _numeric_headers_month_first(header, ref_year)
     out: dict[int, date_type] = {}
     prev: date_type | None = None
     for i, h in enumerate(header):
@@ -529,10 +647,137 @@ def _resolve_date_columns(
                     if prev is not None and d < prev:
                         continue          # went backwards: try next year
                     break
+            if d is None:
+                # Not in the configured shape: try the loose reader so a
+                # minor relabel ('Mon, 31 Aug', '31 Aug', '31/08',
+                # '31-Aug-26') is still a date column.
+                d = _loose_header_date(
+                    s, prev.year if prev else ref_year, prev, anchor,
+                    month_first=month_first,
+                )
         if d is not None:
             out[i] = d
             prev = d
     return out
+
+
+_MONTHS = {
+    m: i for i, names in enumerate((
+        (), ("jan", "january"), ("feb", "february"), ("mar", "march"),
+        ("apr", "april"), ("may",), ("jun", "june"), ("jul", "july"),
+        ("aug", "august"), ("sep", "sept", "september"), ("oct", "october"),
+        ("nov", "november"), ("dec", "december"),
+    )) for m in names
+}
+_WEEKDAYS = {
+    w: i for i, names in enumerate((
+        ("mon", "monday"), ("tue", "tues", "tuesday"), ("wed", "wednesday"),
+        ("thu", "thur", "thurs", "thursday"), ("fri", "friday"),
+        ("sat", "saturday"), ("sun", "sunday"),
+    )) for w in names
+}
+
+
+def _numeric_headers_month_first(header: Sequence[Any], year: int) -> bool:
+    """For all-number day headers ('09/01/2026'), whether they are
+    month-first (US) rather than day-first. A sheet saved on a US-locale
+    PC writes 08/31, 09/01, ...; an Indian one 31/08, 01/09, .... Read
+    both ways and keep the one whose columns run as consecutive days."""
+    pairs: list[tuple[int, int, int | None]] = []
+    for h in header:
+        if not isinstance(h, str):
+            continue
+        tokens = re.findall(r"\d+|[A-Za-z]+", h)
+        if 2 <= len(tokens) <= 3 and all(t.isdigit() for t in tokens):
+            y = int(tokens[2]) if len(tokens) == 3 else None
+            pairs.append((int(tokens[0]), int(tokens[1]), y))
+    if len(pairs) < 2:
+        return False
+
+    def run_score(first_is_day: bool) -> int:
+        dates: list[date_type] = []
+        for a, b, y in pairs:
+            day, month = (a, b) if first_is_day else (b, a)
+            yy = (y + 2000 if y is not None and y < 100 else y) or year
+            try:
+                dates.append(date_type(yy, month, day))
+            except ValueError:
+                dates.append(None)  # type: ignore[arg-type]
+        return sum(
+            1 for x, z in zip(dates, dates[1:])
+            if x is not None and z is not None and (z - x).days == 1
+        )
+
+    return run_score(False) > run_score(True)
+
+
+def _loose_header_date(
+    s: str, base_year: int, prev: date_type | None, anchor: date_type | None,
+    *, month_first: bool = False,
+) -> date_type | None:
+    """A roster column header in any common day/month shape, or None.
+
+    Splits the label into words and numbers ('Mon, 31 Aug' -> mon 31
+    aug; '31/08' -> 31 08; '31Aug26' -> 31 aug 26) and needs a valid day
+    and month; a weekday word, when present, picks the year. Labels like
+    'Name', 'S.no' or 'Contact' have no day+month and are ignored.
+    """
+    tokens = re.findall(r"\d+|[A-Za-z]+", s)
+    if not tokens or len(tokens) > 4:
+        return None
+    weekday: int | None = None
+    month: int | None = None
+    nums: list[int] = []
+    for t in tokens:
+        tl = t.lower()
+        if tl.isdigit():
+            nums.append(int(tl))
+        elif tl in _WEEKDAYS and weekday is None:
+            weekday = _WEEKDAYS[tl]
+        elif tl in _MONTHS and month is None:
+            month = _MONTHS[tl]
+        else:
+            return None                      # any other word: not a date
+    year: int | None = None
+    if month is None:
+        if len(nums) < 2:
+            return None
+        day, month = nums[0], nums[1]        # day-first (31/08)
+        if month_first or (month > 12 and day <= 12):
+            day, month = month, day          # 08/31
+        rest = nums[2:]
+    else:
+        if not nums:
+            return None
+        day, rest = nums[0], nums[1:]
+    if rest:
+        y = rest[0]
+        year = y + 2000 if y < 100 else y
+    if not (1 <= day <= 31 and 1 <= month <= 12):
+        return None
+
+    def make(y: int) -> date_type | None:
+        try:
+            return date_type(y, month, day)
+        except ValueError:
+            return None
+
+    if year is not None:
+        return make(year)
+    candidates = [c for c in (make(y) for y in (base_year, base_year + 1, base_year - 1)) if c]
+    if not candidates:
+        return None
+    if weekday is not None:
+        for c in candidates:
+            # A weekday typo must not throw the column a year backwards.
+            if c.weekday() == weekday and (prev is None or c >= prev):
+                return c
+    if prev is None and anchor is not None:
+        return min(candidates, key=lambda c: abs((c - anchor).days))
+    first = candidates[0]
+    if prev is not None and first < prev and len(candidates) > 1:
+        return candidates[1]                 # Dec -> Jan rolls forward
+    return first
 
 
 def _find_header_idx(header: list[Any], *names: str) -> int | None:
@@ -540,9 +785,9 @@ def _find_header_idx(header: list[Any], *names: str) -> int | None:
     case-insensitively, else None. Used so the reader can pick up
     Employee_ID / License columns whether the assigner labelled them
     'Employee_ID', 'employee_id', 'EmployeeID', etc."""
-    norm_names = {n.strip().lower() for n in names}
+    norm_names = {norm_header(n) for n in names}
     for i, h in enumerate(header):
-        if isinstance(h, str) and h.strip().lower() in norm_names:
+        if isinstance(h, str) and norm_header(h) in norm_names:
             return i
     return None
 
@@ -552,7 +797,7 @@ def _read_wide_roster_sheet(
     *,
     name_column: str,
     date_header_format: str,
-    cycle_year: int,
+    cycle_year: int | None,
     skip_subheader_rows: int,
     status_cfg: StatusConfig,
     id_prefix: str,
@@ -577,9 +822,9 @@ def _read_wide_roster_sheet(
     # then the aliases the real files use.
     name_idx: int | None = None
     for cand in name_candidates:
-        target = cand.strip().lower()
+        target = norm_header(cand)
         for i, h in enumerate(header):
-            if isinstance(h, str) and h.strip().lower() == target:
+            if isinstance(h, str) and norm_header(h) == target:
                 name_idx = i
                 break
         if name_idx is not None:
@@ -592,13 +837,17 @@ def _read_wide_roster_sheet(
     # Canonical ID header is "ID"; "IGA" is what the monthly roster uses.
     id_idx = _find_header_idx(header, *_ID_ALIASES)
     lic_idx = _find_header_idx(header, *_LICENSE_ALIASES)
+    # The year for headers without one: a year written above the header
+    # wins, then a configured override, then the file's own date, then
+    # today. Weekdays in the headers ('Mon,30Mar') then pin the exact
+    # year within one either side, so nothing needs editing in January.
     banner = _banner_year(all_rows, header_idx)
     anchor: date_type | None = None
     if banner is None:
         props = getattr(getattr(ws, "parent", None), "properties", None)
         stamp = getattr(props, "modified", None) or getattr(props, "created", None)
-        anchor = stamp.date() if isinstance(stamp, datetime) else None
-    ref_year = banner or cycle_year
+        anchor = stamp.date() if isinstance(stamp, datetime) else date_type.today()
+    ref_year = banner or cycle_year or (anchor.year if anchor else date_type.today().year)
     date_by_idx = _resolve_date_columns(
         header, date_header_format, ref_year, anchor,
     )

@@ -1,15 +1,13 @@
 # Flight Allocation system — runtime config
 # All maps live here so onboarding a slightly different export shape only
-# requires editing this file, not Python source. See plan §1.5.1.
+# requires editing this file, not Python source. Rules: docs/allocation.md;
+# input files: docs/input-formats.md.
 
-allocation:
-  # Cycle year used to resolve year-less roster headers ("Mon,30Mar" -> 30-Mar-<cycle_year>).
-  cycle_year: 2026
-
-  # Default integration-run date. The launcher and CLI take --date to override.
-  # Sample SV portal contains only this date; AM roster covers it; staff roster
-  # ends 26-Apr so STAFF availability for this D will be empty (W010).
-  default_date: 2026-04-30
+# Roster headers without a year ("Mon,30Mar") get one automatically: a
+# year written above the header, else the weekday + the file's date. To
+# force a year instead, add:
+#   allocation:
+#     cycle_year: 2027
 
 # Step 3 solver parameters.
 solver:
@@ -34,8 +32,22 @@ solver:
   # Result: {23, 23} is far cheaper than {22, 24} at the same total, and a
   # 3+ spread is now heavily penalized rather than merely discouraged —
   # but the solver still needs enough wall-clock time to find it.
-  max_seconds: 700
-  deficit_penalty_lambda: 100   # legacy knob; ignored by lex objective, kept for API compat
+  #
+  # 2026-10-10: 700 -> 40. Most of the old wall clock was not search:
+  # ~4 min of Python model building (pairwise H10, flights x staff loops),
+  # a second full solve for the spread<=2 probe, ~27s of CP-SAT presolve,
+  # and a partial hint CP-SAT could not use. All four are gone (clique
+  # H10, indexed terms, one solve, light presolve, complete greedy hint),
+  # so the solver now starts searching ~7s in from a full allocation and
+  # the rebalance post-pass levels each bucket afterwards.
+  # Then 40 -> 15: the greedy warm start now looks ahead (keeps people
+  # who are needed for the next departures free) and weighs load against
+  # each person's own target. It starts CP-SAT from a better allocation
+  # than 40s of search used to reach (79 vs 88 unplaced on a 2,100-flight
+  # test day), so 10s, 15s and 20s budgets gave the same result. A whole
+  # Allocate now takes ~20s. Raise this if a real day's Workload tab
+  # ever shows the solver stopping too early.
+  max_seconds: 15
 
   # CPU cores for CP-SAT's parallel portfolio search. 0 = auto (all cores,
   # capped at 8). This does not change what the solver will accept as a
@@ -43,14 +55,9 @@ solver:
   # solve) — it only searches more of the space per wall-clock second.
   num_workers: 0
 
-# State / cycle-history.
-state:
-  staleness_max_days: 2          # plan §7.6 W003 threshold
-
 # ---------- I/O column maps ----------
 io:
   sv_portal:
-    sheet: IN_SVportal           # was "Sheet1"; renamed under IN_*-prefix convention
     # 2026-05-14: SV portal export format simplified — fewer columns,
     # different header names. All aliases below (FLT/Flight No., DEP/Origin,
     # ARR/Dest., STD/Dep., TYPE/A/C Type, LOAD/Pax Load) map to the same
@@ -83,8 +90,6 @@ io:
       "Pax Load":    booked_pax_raw
       "Aircraft Owner": owner
     date_format: "%m/%d/%Y"      # US-style m/d/Y per §1.5.1
-    # Step 1 drops rows whose Booked Pax does not match this regex.
-    pax_regex: '^\d+/\d+/\d+$'
     # Phase 3 / Change 1 (2026-05-14, INTL overhaul): flights with
     # DEP in this list are DROPPED at Step 1 extraction. The ARR-side
     # pink-highlight machinery was removed in the same amendment;
@@ -133,18 +138,14 @@ io:
       - SIN
       - TAS
       - TBS
-      - ZRH  # smoke test
       - GVA
 
   staff_roster:
-    sheet: IN_Staff             # was "Sheet1" — IN_*-prefixed naming since 2026-05-13
     name_column: STAFF NAME     # was "Name" — input files use STAFF NAME
     # Header pattern matches "Mon,30Mar" / "Tue,1Apr".
     date_header_format: "%a,%d%b"
-    skip_blank_columns: true     # blank cols between Name and first date are dropped
 
   am_roster:
-    sheet_glob: "IN_AM_Roster*"  # was "AM Roster*" — IN_*-prefixed naming
     name_column: STAFF NAME      # was "NAME" — input files use STAFF NAME
     # Header pattern matches "30-Apr".
     date_header_format: "%d-%b"
@@ -167,19 +168,10 @@ status:
     "ZC/M1": "M1/ZC"
     "ZC/A1": "A1/ZC"
 
-  # Recognized shift codes (current_shift will be populated when status is one of these).
-  shifts: [M, A, N, M1, A1]
-
-  # Recognized non-shift, non-assignable statuses (already in §4.1 enum).
-  non_shift_recognized: [U, F, "P/L", "C/L", "C/OFF", TR, ""]
-
   # Recognized AM/ZC shift variants.
   am_shifts: ["M/IGT", "A/IGT"]
   zc_shifts: ["M/ZC", "A/ZC", "N/ZC", "M1/ZC", "A1/ZC"]
-
-  # Anything not matched above maps to CrewStatus.OTHER, assignable=False.
-  # Common occurrences in real AM data: N/CCC, L&T TRG, *Audit suffixes.
-  unrecognized_treatment: OTHER
+  # Any status not recognised (e.g. N/CCC, L&T TRG) means "not available".
 
 # ---------- Aircraft type -> ops_class lookup ----------
 # Per §4.13: day/night split is by date; other ops_classes (p2f, ferry, test)

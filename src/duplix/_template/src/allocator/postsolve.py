@@ -1,4 +1,4 @@
-"""Post-solve assembly for Step 4.
+"""Post-solve assembly: solver output to allocation rows and pair labels.
 
 Turns the solver's raw ``{flight_id: employee_id}`` assignments into the
 full allocation output: AllocationRow per flight (with PLANNED_BY /

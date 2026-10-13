@@ -1,4 +1,4 @@
-"""Pair generator for Step 4 (H8 + correction r2-7).
+"""Pair generator: prev-shift / next-shift handover pairs (H8).
 
 Auto-generates the full set of boundary pairs for an ops day, sequentially
 by IN_Staff row order. ZCs only pair with ZCs at every boundary. The
@@ -110,27 +110,6 @@ def _one_to_one(
         for i in range(n)
     ]
     return pairs, prev[n:], next_[n:]
-
-
-def _simple_boundary(
-    by_today: dict[tuple[ShiftCode, Role], list[StaffMember]],
-    boundary: OpsBoundary,
-    prev_shift: ShiftCode, next_shift: ShiftCode,
-    pair_role: PairRole,
-) -> list[Pair]:
-    """Pair regulars-with-regulars and ZCs-with-ZCs at a boundary that
-    doesn't use the 3-tier hierarchy. ZC isolation: a regular never
-    pairs with a ZC at this layer (the N→M cross-role exception is
-    handled separately in _n_to_m_cross_role)."""
-    pairs: list[Pair] = []
-    for role in (Role.STAFF, Role.ZC):
-        prev = by_today.get((prev_shift, role), [])
-        next_ = by_today.get((next_shift, role), [])
-        new_pairs, _, _ = _one_to_one(
-            prev, next_, boundary, pair_role, prev_shift, next_shift,
-        )
-        pairs.extend(new_pairs)
-    return pairs
 
 
 def _n_to_m_cross_role(

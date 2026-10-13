@@ -1,4 +1,4 @@
-"""Step 4 — flight allocation orchestrator.
+"""Allocate stage (step 3) — the flight allocation orchestrator.
 
 Reads from state:
   cleaned flights (every ops class except GULF)  — what there is to allocate
@@ -29,25 +29,23 @@ from __future__ import annotations
 import time as _time
 from collections import defaultdict
 from datetime import date as date_t
-from datetime import time as time_t
-from datetime import timedelta as _td
 from pathlib import Path
 
-from .allocator.caps import aggregate_capacity
-from .allocator.eligibility import (
+from ..allocator.caps import aggregate_capacity
+from ..allocator.eligibility import (
     EligibilityContext,
     build_matrix,
     diagnose_unassignable,
     tag_awkward_window,
 )
-from .allocator.pairings import PairGenerationError, generate_pairs
-from .allocator.postsolve import (
+from ..allocator.pairings import PairGenerationError, generate_pairs
+from ..allocator.postsolve import (
     assemble_allocation_rows,
     build_workload_summary,
 )
-from .allocator.windows import std_to_ops_day_minutes
-from .config import Config, load_config
-from .io.readers import (
+from ..allocator.windows import std_to_ops_day_minutes
+from ..config import Config, load_config
+from ..io.readers import (
     read_p2f_exclusions,
     read_p2f_nominations,
     read_per_staff_overrides,
@@ -58,9 +56,9 @@ from .io.readers import (
     read_skip_p2f_buffer_overrides,
     read_waive_h10_pairs,
 )
-from .io.roster_library import read_library
-from .state import AppState
-from .schemas import (
+from ..io.roster_library import read_library
+from ..state import AppState
+from ..schemas import (
     AllocationResult,
     AMRosterRow,
     AvailabilityRow,
@@ -74,7 +72,7 @@ from .schemas import (
     StaffMember,
     WarningRow,
 )
-from .solver.allocator_cpsat import AllocationSolverResult, solve_allocation
+from ..solver.allocator_cpsat import AllocationSolverResult, solve_allocation
 
 # ---------- ZC shift recovery helpers ----------
 # 2026-05-27 (centralization): these three maps are DERIVED from the
@@ -87,7 +85,7 @@ from .solver.allocator_cpsat import AllocationSolverResult, solve_allocation
 # Adding a new ZC variant to STATUS_IS_ZC (in schemas.py) auto-flows
 # here. Adding a new P2F-handler status to STATUS_TO_P2F_HANDLER_SHIFT
 # auto-flows here. No more "I forgot to update this map" bugs.
-from .schemas import (
+from ..schemas import (
     STATUS_IS_ZC as _CENTRAL_ZC,
     STATUS_TO_P2F_HANDLER_SHIFT as _CENTRAL_P2F_SHIFT,
     STATUS_TO_SHIFT as _CENTRAL_SHIFT,
@@ -351,24 +349,23 @@ def _build_p2f_handler_anchors(
     """Compute the list of P2F flight STDs (in ops-day minutes) per
     handler — drives the H4 buffer (F6 in eligibility: no normal
     flights from STD-2hrs to STD+1hr)."""
+    from ..allocator.windows import is_in_std_window
     out: dict[str, list[int]] = defaultdict(list)
-    # Group P2F flights by their shift's handler.
     for f in flights:
         if f.ops_class != OpsClass.P2F:
             continue
-        # The handler is whichever shift owns this STD — but we don't
-        # know shift here without a staff member. Best heuristic: use
-        # the shift whose nominal window contains the STD.
-        from .allocator.windows import SHIFT_NOMINAL_MIN
         std_min = std_to_ops_day_minutes(f.std, f.date, ops_day)
-        for shift, (start, end) in SHIFT_NOMINAL_MIN.items():
-            if start <= std_min <= end:
-                # Which of the shift's handlers gets this flight is the
-                # solver's call, so every handler of the shift keeps the
-                # no-normal-flight window around it (safe, if cautious).
-                for handler in handlers_by_shift.get(shift, ()):
+        # Every handler who is ELIGIBLE for this flight (their shift's STD
+        # window contains it — the same test eligibility F5 applies) keeps
+        # the no-normal-flight window around it. Which of them flies it is
+        # the solver's call. Matching on nominal shift hours instead and
+        # stopping at the first hit sent 12:31-14:30 flights to M1 and
+        # 21:01-23:00 flights to A1 — shifts with no handlers — so the A
+        # and N handlers who actually flew them got no buffer at all.
+        for shift, handlers in handlers_by_shift.items():
+            if handlers and is_in_std_window(f.std, f.date, ops_day, shift):
+                for handler in handlers:
                     out[handler].append(std_min)
-                break
     return dict(out)
 
 
@@ -411,6 +408,14 @@ def run(
     availability = list(state.availability)
     overrides = list(state.overrides)
     prev_staff_by_key = _snapshot_prev_staff(state)
+    prev_forced_keys = {
+        _flight_key(
+            r.flt, r.dep, r.arr,
+            r.std.isoformat(timespec="minutes"), r.date.isoformat(),
+        )
+        for r in state.allocations
+        if r.staff_name and "FORCED:" in (r.warning or "")
+    }
 
     am_rows = read_library(state, "am_roster", config, [d_day])
 
@@ -661,7 +666,7 @@ def run(
         )
     # Compute which shifts actually have P2F flights in their window —
     # those are the shifts where a missing nomination is a real problem.
-    from .allocator.windows import SHIFT_NOMINAL_MIN
+    from ..allocator.windows import SHIFT_NOMINAL_MIN
     # Per user direction 2026-05-10: P2F handlers are M/A/N only.
     # M1/A1 windows are intentionally NOT counted — those P2F flights
     # have no handler and will land in OUT_Unallocated if their STD
@@ -671,16 +676,18 @@ def run(
     p2f_count_by_shift: dict[ShiftCode, int] = defaultdict(int)
     # 2026-05-27 (centralization): pulled from schemas — single source
     # of truth for which shifts nominate plain P2F handlers.
-    from .schemas import P2F_HANDLER_ELIGIBLE_SHIFTS
+    from ..schemas import P2F_HANDLER_ELIGIBLE_SHIFTS
     p2f_relevant_shifts = P2F_HANDLER_ELIGIBLE_SHIFTS
+    from ..allocator.windows import is_in_std_window as _in_std_window
     for f in flights:
         if f.ops_class != OpsClass.P2F:
             continue
-        std_min = std_to_ops_day_minutes(f.std, f.date, d_day)
-        for shift, (start, end) in SHIFT_NOMINAL_MIN.items():
+        # Same STD-window test eligibility uses, so the shift counted here
+        # is the shift whose handler can actually take the flight.
+        for shift in SHIFT_NOMINAL_MIN:
             if shift not in p2f_relevant_shifts:
                 continue
-            if start <= std_min <= end:
+            if _in_std_window(f.std, f.date, d_day, shift):
                 p2f_shifts_needing_handler.add(shift)
                 p2f_count_by_shift[shift] += 1
                 break
@@ -755,7 +762,7 @@ def run(
     # valid (STAFF, on that shift today, licence really says P2F). Roster
     # cells and manual nominations above are kept; only the shortfall is
     # filled. Anything still short is a gap the operator must fill.
-    from .allocator.p2f_autofill import (
+    from ..allocator.p2f_autofill import (
         Candidate,
         autofill_handlers,
         handlers_needed,
@@ -963,7 +970,7 @@ def run(
         # partners at the same boundary — flag everything except the
         # sanctioned A→N split-1+2 pattern. W215 warnings flow into
         # OUT_Warnings + the dashboard panel.
-        from .allocator.pair_validation import validate_pair_discrepancies
+        from ..allocator.pair_validation import validate_pair_discrepancies
         warnings.extend(validate_pair_discrepancies(pairs, d_day))
     except PairGenerationError as e:
         warnings.append(WarningRow(
@@ -984,8 +991,7 @@ def run(
     # almost every non-handler staff to it (everyone-at-22 on light
     # days, everyone-at-24 on heavy ones). Solver matches this by
     # computing the level from the day's flight-to-staff ratio and
-    # using it as the target in S1. See MANUAL_PATTERNS_VS_ENGINE.md
-    # Finding 1 for evidence.
+    # using it as the target in S1.
     #
     # Per (shift, role): level = round(total_flights / non_handler_staff_count),
     # clipped to [band.min, band.max] from configs/shift_limits.json.
@@ -1005,14 +1011,18 @@ def run(
     # 700s solve). Bucketing flights by their own shift window (same
     # windowing the solver enforces via eligibility) gives each shift
     # its own realistic ratio instead.
-    from .allocator.windows import SHIFT_NOMINAL_MIN as _SHIFT_NOMINAL_MIN
-    flights_per_shift_min: dict[ShiftCode, int] = defaultdict(int)
-    for f in flights:
-        f_std_min = std_to_ops_day_minutes(f.std, f.date, d_day)
-        for shift_code_iter, (s_start, s_end) in _SHIFT_NOMINAL_MIN.items():
-            if s_start <= f_std_min <= s_end:
-                flights_per_shift_min[shift_code_iter] += 1
-                break
+    #
+    # 2026-10-10 fix: shifts overlap (M/M1, M1/A, A/A1, A1/N), so a flight
+    # is not "owned" by one shift. Each normal flight is shared between
+    # every shift whose STD window can take it (the same test eligibility
+    # F5 applies), in proportion to that shift's headcount — the share
+    # each shift would carry if everyone eligible did equal work. The
+    # previous first-match on nominal hours credited M1 only with
+    # 12:31-14:30 and A1 only with 21:01-23:00, so M1/A1 were always
+    # targeted at the band floor while M/A were targeted at the cap.
+    # ZCs carry a smaller band, so their expected load comes off the
+    # shift's share first and STAFF level on what remains.
+    from ..allocator.windows import is_in_std_window as _in_std_window
     handler_set = {e for ids in handlers_by_shift.values() for e in ids}
     bucket_sizes: dict[tuple[ShiftCode, Role], int] = defaultdict(int)
     staff_per_shift: dict[ShiftCode, int] = defaultdict(int)
@@ -1022,28 +1032,80 @@ def run(
             continue
         bucket_sizes[(s.shift_today, s.role)] += 1
         staff_per_shift[s.shift_today] += 1
-    from .allocator.caps import get_band as _get_band
-    day_level_by_bucket: dict[tuple[ShiftCode, Role], int] = {}
-    for (shift_code, role), size in bucket_sizes.items():
-        shift_staff_count = staff_per_shift.get(shift_code) or 1
-        raw_level = round(
-            flights_per_shift_min.get(shift_code, 0) / shift_staff_count
-        )
+    flights_per_shift: dict[ShiftCode, float] = defaultdict(float)
+    for f in flights:
+        if f.ops_class == OpsClass.P2F:
+            continue  # handler-only; handlers sit outside the buckets
+        covering = [
+            sh for sh in staff_per_shift
+            if _in_std_window(f.std, f.date, d_day, sh)
+        ]
+        heads = sum(staff_per_shift[sh] for sh in covering)
+        for sh in covering:
+            flights_per_shift[sh] += staff_per_shift[sh] / heads
+    from ..allocator.caps import get_band as _get_band
+
+    def _clip(level: int, shift_code: ShiftCode, role: Role) -> int:
         band = _get_band(shift_code, role)
         if band is None:
-            day_level_by_bucket[(shift_code, role)] = raw_level
-            continue
-        lo, hi = band["min"], band["max"]
-        day_level_by_bucket[(shift_code, role)] = max(lo, min(raw_level, hi))
+            return level
+        return max(band["min"], min(level, band["max"]))
+
+    day_level_by_bucket: dict[tuple[ShiftCode, Role], int] = {}
+    for shift_code, heads in staff_per_shift.items():
+        share = flights_per_shift.get(shift_code, 0.0)
+        n_zc = bucket_sizes.get((shift_code, Role.ZC), 0)
+        n_staff = bucket_sizes.get((shift_code, Role.STAFF), 0)
+        if n_zc:
+            zc_level = _clip(round(share / heads), shift_code, Role.ZC)
+            day_level_by_bucket[(shift_code, Role.ZC)] = zc_level
+            share = max(0.0, share - n_zc * zc_level)
+        if n_staff:
+            day_level_by_bucket[(shift_code, Role.STAFF)] = _clip(
+                round(share / n_staff), shift_code, Role.STAFF,
+            )
     if day_level_by_bucket:
         print(
-            "  Day-level targeting (per-shift ratio, 2026-09-23 fix): "
+            "  Day-level targeting (shared-window share): "
             + ", ".join(
                 f"{k[0]}/{k[1].value}={v} "
-                f"(flights_in_shift={flights_per_shift_min.get(k[0], 0)}, "
+                f"(share={flights_per_shift.get(k[0], 0):.0f}, "
                 f"staff_in_shift={staff_per_shift.get(k[0], 0)})"
                 for k, v in sorted(day_level_by_bucket.items())
             )
+        )
+
+    # Staff who cannot reach their bucket's level for a reason of their
+    # own — a lowered max_flights cap, a cutoff_time window, or simply too
+    # few eligible flights — are left out of the bucket's spread terms.
+    # Otherwise the hard spread<=2 ceiling (and the soft spread penalty)
+    # drags every colleague down to that one person's count + 2, and the
+    # flights the colleagues can no longer take go unallocated.
+    from ..allocator.caps import hard_cap_for as _hard_cap_for
+    elig_count: dict[str, int] = defaultdict(int)
+    for f in flights:
+        if f.ops_class == OpsClass.P2F:
+            continue
+        for eid in matrix.get(f.unique_id, ()):
+            elig_count[eid] += 1
+    spread_exempt_ids: set[str] = set()
+    for s in staff_today:
+        if s.shift_today is None or s.role == Role.AM:
+            continue
+        level = day_level_by_bucket.get((s.shift_today, s.role))
+        if level is None:
+            continue
+        if (
+            s.std_cutoff is not None
+            or s.std_start is not None
+            or _hard_cap_for(s) < level
+            or elig_count.get(s.employee_id, 0) < level
+        ):
+            spread_exempt_ids.add(s.employee_id)
+    if spread_exempt_ids:
+        print(
+            f"  Spread-exempt (own cap/window/supply limits): "
+            f"{sorted(staff_by_id[e].name for e in spread_exempt_ids if e in staff_by_id)}"
         )
 
     # --- Sick-call iteration: pin prior allocation, redistribute only
@@ -1078,6 +1140,11 @@ def run(
             eid = name_lookup.get(staff_name.strip().upper())
             if eid is None or eid in free_for_redist:
                 continue
+            # Rows force-placed last run may break H10 / H16 on purpose;
+            # pinning them would make the re-solve INFEASIBLE and throw
+            # the whole day to the greedy fallback. Let them move.
+            if uid in prev_forced_keys:
+                continue
             # Only pin if this staff is still on shift — don't lock a
             # prior allocation to someone who's now off for some other
             # reason (eligibility would reject it anyway).
@@ -1091,15 +1158,13 @@ def run(
             )
 
     # --- Solve ----------
-    # 2026-09-23: try a HARD same-bucket spread ceiling of 2 first
-    # (user direction — "give that person a break" once they're more
-    # than 2 behind their least-loaded peer). If the day's real H10
-    # spacing / eligibility shape makes that impossible somewhere,
-    # CP-SAT reports the WHOLE day INFEASIBLE (one combined model —
-    # see hard_bucket_spread_max docstring), so we retry without the
-    # hard cap rather than falling all the way through to the greedy
-    # fallback, which would drop every soft objective for the entire
-    # day just because one bucket couldn't hit spread<=2.
+    # 2026-10-10 (speed): ONE solve. The previous hard spread<=2 probe
+    # ran first on a separate model with up to 300s of its own; on a full
+    # day it routinely timed out without any solution and the day was
+    # then solved a second time from scratch. The same goal is served by
+    # the soft spread terms (S1b, 600/unit + 1,000/unit beyond 1) and the
+    # rebalance post-pass, which levels every bucket to a spread of 1
+    # wherever eligibility and spacing allow.
     _solve_kwargs = dict(
         ops_day=d_day,
         max_seconds=config.solver.max_seconds,
@@ -1109,7 +1174,12 @@ def run(
         # S3 (heavy-flight spread) used pax to identify "heavy" flights;
         # disabled per user direction 2026-05-10 — pax is reference-only.
         enable_s3_heavy_spread=False,
-        enable_s4_pair_stability=True,
+        # S4 (row-order tiebreak) off since 2026-10-10: at 1 x row index
+        # per flight (up to ~100) it outweighed S5/S6/S7 and handed the
+        # odd extra flight to the top of the roster every single day.
+        # The solver is deliberately stochastic, so it bought no
+        # determinism either.
+        enable_s4_pair_stability=False,
         enable_s5_handover_preference=True,
         enable_s6_awkward_preference=True,
         enable_s7_zc_buffer_avoidance=True,
@@ -1132,39 +1202,9 @@ def run(
         day_level_by_bucket=day_level_by_bucket,
         # 2026-05-18 sick-call iteration: pin prior allocation in place.
         pinned_assignments=pinned_assignments or None,
+        spread_exempt_ids=frozenset(spread_exempt_ids),
     )
-    result = solve_allocation(
-        flights, staff_today, matrix,
-        hard_bucket_spread_max=2,
-        **{
-            **_solve_kwargs,
-            # 2026-09-23: give the hard-capped attempt a SHORT probe
-            # budget rather than the full config, so a bucket that
-            # can't hit spread<=2 fails fast instead of burning the
-            # whole time budget twice (once to fail here, again to
-            # solve properly below). If it's achievable, CP-SAT
-            # usually finds it well inside this window; if not, we
-            # want to find that out quickly and move on.
-            "max_seconds": max(60, min(config.solver.max_seconds // 2, 300)),
-        },
-    )
-    # Any non-usable status here (INFEASIBLE, TIMEOUT/UNKNOWN,
-    # MODEL_INVALID) means we do NOT have a real assignment set —
-    # only OPTIMAL/FEASIBLE do. Retry without the hard cap, with the
-    # FULL configured time budget, rather than falling through to the
-    # greedy fallback (which would drop every soft objective for the
-    # whole day just because one bucket couldn't hit spread<=2).
-    if result.status not in ("OPTIMAL", "FEASIBLE"):
-        print(
-            f"  Hard spread<=2 probe returned {result.status} — "
-            "retrying without the hard cap (soft spread penalty only, "
-            "full time budget)."
-        )
-        result = solve_allocation(
-            flights, staff_today, matrix,
-            hard_bucket_spread_max=None,
-            **_solve_kwargs,
-        )
+    result = solve_allocation(flights, staff_today, matrix, **_solve_kwargs)
 
     # --- Greedy fallback (2026-09-22) ----------
     # CP-SAT is an EXACT solver: if any combination of hard constraints
@@ -1187,9 +1227,10 @@ def run(
             "balancing) so flights still get placed. Review the "
             "Workload tab manually after this run."
         )
-        from .allocator.greedy_fallback import greedy_allocate
+        from ..allocator.greedy_fallback import greedy_allocate
         fallback_assignments = greedy_allocate(
             flights, staff_today, matrix, ops_day=d_day,
+            preassigned=pinned_assignments or None,
         )
         warnings.append(WarningRow(
             severity=Severity.ERROR, code="W299", date=d_day,
@@ -1234,7 +1275,7 @@ def run(
     _p2f_logic_v2 = bool(getattr(config.p2f_adjustment, "logic_v2", False))
 
     def _run_intl_postpass(in_rows):
-        from .allocator.postpass_intl import apply_intl_post_pass
+        from ..allocator.postpass_intl import apply_intl_post_pass
         out_rows, summary = apply_intl_post_pass(
             in_rows, flights, staff_today, matrix,
             elig_ctx_p2f_handlers=elig_ctx.p2f_handler_by_shift,
@@ -1257,7 +1298,7 @@ def run(
 
     def _run_p2f_postpass(in_rows):
         if _p2f_logic_v2:
-            from .allocator.postpass_p2f import apply_p2f_post_pass_v2
+            from ..allocator.postpass_p2f import apply_p2f_post_pass_v2
             out_rows, summary = apply_p2f_post_pass_v2(
                 in_rows, flights, staff_today, matrix,
                 p2f_handlers=elig_ctx.p2f_handler_by_shift,
@@ -1265,7 +1306,7 @@ def run(
             )
             tag = "P2F post-pass (v2 union window)"
         else:
-            from .allocator.postpass_p2f import apply_p2f_post_pass
+            from ..allocator.postpass_p2f import apply_p2f_post_pass
             out_rows, summary = apply_p2f_post_pass(
                 in_rows, flights, staff_today, matrix,
                 p2f_handlers=elig_ctx.p2f_handler_by_shift,
@@ -1295,25 +1336,39 @@ def run(
         + (" (v2 union window)" if _p2f_logic_v2 else "")
         + " -> INTL",
     )
+    def _uid_of(r):
+        return (
+            f"{r.flt}|{r.dep}|{r.arr}|{r.std.isoformat(timespec='minutes')}"
+            f"|{r.date.isoformat()}"
+        )
+
+    _owner_before_postpass = {
+        _uid_of(r): r.staff_employee_id for r in rows if r.staff_employee_id
+    }
     rows, p2f_summary = _run_p2f_postpass(rows)
     rows, intl_summary = _run_intl_postpass(rows)
+    # Flights the P2F / INTL post-passes took off someone: the repair
+    # pass below must not hand them back.
+    _postpass_removed = {
+        (uid, before) for uid, before in _owner_before_postpass.items()
+    } - {(_uid_of(r), r.staff_employee_id) for r in rows}
 
     # 2026-09-23 fix: the P2F/INTL post-passes above remove flights
     # from whoever happens to sit next to a P2F/INTL flight, not from
     # whoever currently has the most flights — so they can re-open the
     # spread the solver's H18 constraint just closed (see
-    # docs/REVIEW_NOTES.md finding #4). Run a final leveling pass:
+    # docs/allocation.md, "Post-passes"). Run a final leveling pass:
     # while a (shift, role) bucket's most- and least-loaded staff
     # differ by more than 1, move one eligible flight from the former
     # to the latter. Every move still respects eligibility, H10
     # spacing, and hard caps — it only re-picks who among already-
     # eligible people does which flight.
-    from .allocator.postpass_rebalance import apply_rebalance_pass
+    from ..allocator.postpass_rebalance import apply_rebalance_pass
     if pin_prior:
         # Minimal-change re-solve: leveling would move already-placed
         # flights between staff, which is exactly what the operator
         # asked us not to do.
-        from .allocator.postpass_rebalance import RebalanceSummary
+        from ..allocator.postpass_rebalance import RebalanceSummary
         rebalance_summary = RebalanceSummary()
     else:
         rows, rebalance_summary = apply_rebalance_pass(
@@ -1321,6 +1376,7 @@ def run(
             p2f_handlers=elig_ctx.p2f_handler_by_shift,
             d_day=d_day,
             extra_handler_ids=elig_ctx.all_p2f_handler_ids,
+            exempt_ids=frozenset(spread_exempt_ids),
         )
     if rebalance_summary.n_transfers:
         print(
@@ -1345,8 +1401,8 @@ def run(
     # one are released early instead — their last hour is cleared of
     # flights — and who that is rotates day to day. Runs BEFORE the break
     # pass, which is told not to give released staff late flights back.
-    from . import relief_store
-    from .allocator.relievers import plan_relief
+    from ..storage import relief_store
+    from ..allocator.relievers import plan_relief
     rows, relief_plan = plan_relief(
         rows, flights, staff_today, matrix, d_day, pairs,
         free_early_min=config.relief_pass.free_early_minutes,
@@ -1390,9 +1446,9 @@ def run(
             ),
         ))
 
-    from .allocator.postpass_break import apply_break_pass
+    from ..allocator.postpass_break import apply_break_pass
     if pin_prior:
-        from .allocator.postpass_break import BreakSummary
+        from ..allocator.postpass_break import BreakSummary
         break_summary = BreakSummary()
     else:
         rows, break_summary = apply_break_pass(
@@ -1449,9 +1505,66 @@ def run(
     _all_flights = list(flights) + list(zero_elig_flights)
     _placed = {_row_uid(r): r.staff_employee_id for r in rows if r.staff_employee_id}
     _leftover = [f for f in _all_flights if f.unique_id not in _placed]
+
+    # Repair (2026-10-11): before relaxing any rule, try to free an
+    # eligible person for each leftover flight with a short chain of
+    # moves (A takes the leftover, A's clashing flight goes to B, ...).
+    # Every move obeys the hard rules; only what this cannot place goes
+    # on to force-place. Skipped on a pinned re-run, which must not move
+    # placed flights.
+    _repaired = False
+    if _leftover and not pin_prior:
+        from ..allocator.eligibility import sheet_target_for
+        from ..allocator.repair import repair_leftovers
+        from ..allocator.postsolve import assemble_allocation_rows as _assemble
+        _rep = repair_leftovers(
+            _leftover, _placed, _all_flights, staff_today, matrix,
+            ops_day=d_day,
+            max_std_by_staff=relief_plan.freed,
+            blocked_windows=break_summary.breaks,
+            forbidden=_postpass_removed,
+        )
+        if _rep.placed or _rep.moved:
+            _repaired = True
+            _sb_rep = {x.employee_id: x for x in staff_today}
+            _fb_rep = {f.unique_id: f for f in _all_flights}
+            new_rows = []
+            for r in rows:
+                uid = _row_uid(r)
+                eid = _rep.moved.get(uid)
+                if eid is not None:
+                    s_new = _sb_rep[eid]
+                    r = r.model_copy(update={
+                        "staff_employee_id": eid,
+                        "staff_name": s_new.name,
+                        "sheet_target": sheet_target_for(_fb_rep[uid], s_new),
+                    })
+                elif uid in _rep.placed and not r.staff_employee_id:
+                    continue   # replaced by the placed row below
+                new_rows.append(r)
+            new_rows.extend(_assemble(
+                [_fb_rep[u] for u in _rep.placed], staff_today,
+                dict(_rep.placed), pairs, d_day,
+            ))
+            rows = new_rows
+            for sid, msgs in _rep.workload_notes.items():
+                merged_workload_notes[sid].extend(msgs)
+            _placed = {
+                _row_uid(r): r.staff_employee_id
+                for r in rows if r.staff_employee_id
+            }
+            _leftover = [f for f in _all_flights if f.unique_id not in _placed]
+        print(
+            f"  Repair pass: placed {len(_rep.placed)} of "
+            f"{_rep.n_tried} leftover flight(s) without relaxing a rule "
+            f"({len(_rep.moved)} other flight(s) moved to make room)"
+        )
+        for line in _rep.log_lines[:20]:
+            print(f"  repair: {line}")
+
     if _leftover:
-        from .allocator.force_place import force_place_remaining
-        from .allocator.postsolve import assemble_allocation_rows as _assemble
+        from ..allocator.force_place import force_place_remaining
+        from ..allocator.postsolve import assemble_allocation_rows as _assemble
         _forced = force_place_remaining(
             _leftover, staff_today, _placed, _all_flights,
             ops_day=d_day, elig_ctx=elig_ctx,
@@ -1500,7 +1613,37 @@ def run(
         )
         counts["FORCED"] = len(_forced)
 
-    from .allocator.postsolve import relabel_pair_columns
+    # Second leveling pass (2026-10-10). Force-place runs after the first
+    # rebalance and hands each leftover flight to whoever breaks the
+    # fewest rules — often someone already at the top of their bucket
+    # (real 26-Sep run: every bucket within 2 before force-place, 3
+    # after). Level again, leaving the forced rows where they are and
+    # honouring early releases and secured break windows.
+    if not pin_prior and (_leftover or _repaired):
+        _forced_uids = {
+            _row_uid(r) for r in rows if "FORCED:" in (r.warning or "")
+        }
+        rows, rebalance2 = apply_rebalance_pass(
+            # All flights, so the zero-eligibility ones force-placed above
+            # still count for spacing (they are frozen, never moved).
+            rows, _all_flights, staff_today, matrix,
+            p2f_handlers=elig_ctx.p2f_handler_by_shift,
+            d_day=d_day,
+            extra_handler_ids=elig_ctx.all_p2f_handler_ids,
+            exempt_ids=frozenset(spread_exempt_ids),
+            max_std_by_staff=relief_plan.freed,
+            blocked_windows=break_summary.breaks,
+            frozen_uids=frozenset(_forced_uids),
+        )
+        if rebalance2.n_transfers:
+            print(
+                f"  Rebalance after force-place: "
+                f"transfers={rebalance2.n_transfers}"
+            )
+        for sid, msgs in rebalance2.workload_notes.items():
+            merged_workload_notes[sid].extend(msgs)
+
+    from ..allocator.postsolve import relabel_pair_columns
     rows = relabel_pair_columns(
         rows, flights, staff_today, pairs, d_day, relief=relief_plan,
     )
@@ -1604,7 +1747,7 @@ def run(
     # P2F handler) — fair load on the prep work and
     # avoids picking the same person every night.
     if preplan_only_flights:
-        from .schemas import AllocationRow, AllocationSheet
+        from ..schemas import AllocationRow, AllocationSheet
         handler_set = elig_ctx.all_p2f_handler_ids
         n_pool = [
             s for s in staff_today
@@ -1753,7 +1896,7 @@ def run(
     # `matrix` before solve) so the recommender's Path-B / Path-C
     # branches can suggest skip_p2f_buffer / skip_intl_removal for
     # them. Each gets an empty matrix entry so Path A is a no-op.
-    from .allocator.recommender import recommend_for_unallocated
+    from ..allocator.recommender import recommend_for_unallocated
     try:
         reco_flights = list(flights) + list(zero_elig_flights)
         reco_matrix = dict(matrix)
@@ -1811,6 +1954,13 @@ def run(
         state.prev_staff_by_key = prev_staff_by_key
     if warnings:
         _store_warnings(state, warnings, append=append_warnings)
+    # Refresh the staffing advice with what this run actually had to
+    # squeeze — it must never suggest removing people from those hours.
+    from . import recommender_staffing as _rs
+    try:
+        _rs.run_for_state(state, d_day)
+    except Exception as exc:  # noqa: BLE001 — advisory only
+        print(f"  WARNING: staffing recommender failed: {exc}")
     state.stamp_run(
         mode=mode_label, solver_status=result.status,
         duration_s=_time.monotonic() - started,
@@ -1827,10 +1977,14 @@ def _store_warnings(
     state: AppState, warnings: list[WarningRow], *, append: bool,
 ) -> None:
     """Put this stage's warnings on the state, either appending to what
-    Plan left behind or replacing it."""
+    Plan left behind or replacing it.
+
+    Allocate's own codes are all W2xx (Plan's are W0xx). A previous
+    Allocate's W2xx rows are dropped first, so re-running Allocate (sick
+    call, override, or just again) replaces them instead of piling up a
+    second copy of every warning."""
     with state.lock:
-        state.warnings = (
-            list(state.warnings) + warnings if append else list(warnings)
-        )
+        kept = [w for w in state.warnings if not w.code.startswith("W2")]
+        state.warnings = kept + warnings if append else list(warnings)
 
 

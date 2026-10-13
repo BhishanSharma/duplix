@@ -165,3 +165,58 @@
     padding: 14px;
   }
 }
+/* ---- staffing recommendation cards ---- */
+
+.staffing-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+@media (max-width: 1000px) {
+  .staffing-grid { grid-template-columns: minmax(0, 1fr); }
+}
+/* Status on the top edge. Doubled class so theme.css's later .stat-card
+   border rule doesn't override it. */
+.stat-card.staffing-card { border-top: 4px solid var(--ok); }
+.stat-card.staffing-card.staffing-add { border-top-color: var(--danger); }
+.stat-card.staffing-card.staffing-remove { border-top-color: var(--brand); }
+.stat-card.staffing-card.staffing-tight { border-top-color: var(--warn); }
+.staffing-headline {
+  font-size: 16px;
+  font-weight: 600;
+  margin: 4px 0 8px;
+}
+.staffing-add .staffing-headline { color: var(--danger); }
+.staffing-peak-text { font-size: 0.85em; }
+.staffing-meter {
+  position: relative;
+  height: 8px;
+  margin: 6px 0 8px;
+  border-radius: 4px;
+  background: var(--line);
+}
+.staffing-meter span {
+  display: block;
+  height: 100%;
+  border-radius: 4px;
+  background: var(--ok);
+}
+.staffing-meter.tight span { background: var(--warn); }
+.staffing-meter.over span { background: var(--danger); }
+.staffing-meter i {
+  position: absolute;
+  top: -3px;
+  width: 2px;
+  height: 14px;
+  background: var(--text);
+  opacity: 0.55;
+}
+.staffing-why {
+  font-size: 0.85em;
+  line-height: 1.45;
+  margin: 0 0 6px;
+}
+.staffing-line {
+  font-size: 0.8em;
+  line-height: 1.45;
+  margin-bottom: 4px;
+}
+.staffing-squeezed { color: var(--danger); }

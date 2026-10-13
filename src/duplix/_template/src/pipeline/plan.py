@@ -24,10 +24,10 @@ from collections import Counter
 from datetime import date as date_t
 from pathlib import Path
 
-from .allocator.windows import SHIFT_NOMINAL_MIN, std_to_ops_day_minutes
-from .config import load_config
-from .schemas import OpsClass
-from .state import AppState
+from ..allocator.windows import SHIFT_NOMINAL_MIN, std_to_ops_day_minutes
+from ..config import load_config
+from ..schemas import OpsClass
+from ..state import AppState
 from .step1_clean_flights import run as run_step1
 from .step2_extract_roster import run as run_step2
 
@@ -179,8 +179,9 @@ def run(
         state.plan_summary = payload
         state.plan_text = text
 
-    # Staffing recommender: required = max(peak_floor, volume_floor,
-    # p2f_floor) per shift. Advisory — a failure here must not break Plan.
+    # Staffing recommender: people needed per pool from the busiest
+    # 15-minute slots and total volume (Allocate refreshes it with what
+    # it had to squeeze). Advisory — a failure here must not break Plan.
     from . import recommender_staffing as _rs
     try:
         _rs.run_for_state(state, d_day)
