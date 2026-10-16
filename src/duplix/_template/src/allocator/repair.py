@@ -48,6 +48,7 @@ def repair_leftovers(
     max_std_by_staff: dict[str, int] | None = None,
     blocked_windows: dict[str, tuple[int, int]] | None = None,
     forbidden: set[tuple[str, str]] | frozenset = frozenset(),
+    extra_ok=None,
     max_depth: int = 3,
     max_candidates: int = 8,
     node_budget: int = 40_000,
@@ -56,7 +57,9 @@ def repair_leftovers(
 
     ``assignments`` is the current ``{uid: employee_id}``; it is not
     modified. ``forbidden`` holds ``(uid, employee_id)`` pairs that must
-    not be created. Returns the placements and the moves they needed.
+    not be created. ``extra_ok(eid, uid, held)`` is an additional rule
+    every placement must pass (e.g. ``SelfPlanRule.ok``). Returns the
+    placements and the moves they needed.
     """
     summary = RepairSummary()
     by_uid = {f.unique_id: f for f in all_flights}
@@ -125,6 +128,10 @@ def repair_leftovers(
                 continue
             clash = _clashes(uid, eid)
             if any(by_uid[h].ops_class == OpsClass.P2F for h in clash):
+                continue
+            if extra_ok is not None and not extra_ok(
+                eid, uid, held[eid] - set(clash),
+            ):
                 continue
             if len(held[eid]) - len(clash) + 1 > cap[eid]:
                 continue

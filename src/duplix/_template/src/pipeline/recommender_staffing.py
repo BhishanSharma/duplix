@@ -12,7 +12,7 @@ What it measures now
 --------------------
 For every 15-minute slot of the day (stepping 5 min) it counts the
 departures in the slot and the people who could take at least one of
-them (shift STD window; ZCs stop an hour before their shift ends). A
+them (shift STD window; ZCs keep their first hour free and stop an hour early). A
 person can take at most ONE flight in any 15-minute slot (H10), so:
 
 * use > 100%  — more flights than people: the engine MUST squeeze
@@ -40,8 +40,8 @@ from datetime import time as time_t
 from pathlib import Path
 
 from ..allocator.windows import (
-    SHIFT_STD_WINDOW_INNER,
-    SHIFT_STD_WINDOW_OUTER_END,
+    hours_for,
+    std_window_for,
     std_to_ops_day_minutes,
 )
 from ..schemas import Role, ShiftCode
@@ -54,7 +54,10 @@ _SLOT_STEP = 5
 # slot is comfortable. Calibrated on two real 2,100-flight days: no
 # squeezed flight at <= 85%, squeezing from ~89% upward.
 SAFE_USE = 0.85
-# ZCs take no normal flight in their last hour (H21).
+# ZCs: first STD at shift start + 120 (no work in their first hour, and
+# work starts an hour before STD), last STD at shift end - 60 (H21, the
+# defaults of ``zc_cutoff`` in config.yml).
+_ZC_START_MIN = 120
 _ZC_CUTOFF_MIN = 60
 # Below this many spare people a pool is reported as OK, not REMOVE.
 _REMOVE_MIN = 3
@@ -128,10 +131,11 @@ def _slot_label(t: int) -> str:
 
 def _covers(group: Group, minute: int) -> bool:
     shift, role = group
-    lo, hi = SHIFT_STD_WINDOW_INNER[shift]
-    hi = SHIFT_STD_WINDOW_OUTER_END.get(shift, hi)
+    lo, hi = std_window_for(shift, role)      # ZCs: their own hours
     if role == "ZC":
-        hi -= _ZC_CUTOFF_MIN
+        start, end = hours_for(shift, role)
+        lo = max(lo, start + _ZC_START_MIN)
+        hi = min(hi, end - _ZC_CUTOFF_MIN)
     return lo <= minute <= hi
 
 

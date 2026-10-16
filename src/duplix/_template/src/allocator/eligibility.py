@@ -22,7 +22,10 @@ Hard constraints enforced HERE:
   H20  nominated P2F handlers never take international flights (frees
        up their day for more P2F work)
   H21  ZCs take no normal flight in the last ``zc_end_cutoff_min`` (60)
-       minutes of their shift — their STD must be <= nominal end - 60
+       minutes of their shift — their STD must be <= nominal end - 60 —
+       nor before ``zc_start_cutoff_min`` (120) after their start: work on
+       a flight begins an hour before STD, so STD >= start + 120 keeps
+       their first hour free
 
 Hard constraints NOT enforced here (deferred to the solver):
   H1   exactly one staff per flight       — solver objective
@@ -53,8 +56,9 @@ from ..schemas import (
 from .windows import (
     SHIFT_NOMINAL_MIN,
     awkward_eligible_shifts,
+    hours_for,
     in_p2f_block,
-    is_in_std_window,
+    is_in_std_window_for,
     std_to_ops_day_minutes,
 )
 
@@ -67,6 +71,7 @@ def _intl_handler_covers_d75_through_std(
     flight_std: time_t,
     flight_date: date_t,
     ops_day: date_t,
+    role: object = None,
 ) -> bool:
     """For INTL same-handler rule (Change 4): does ``staff_shift``'s
     nominal working window cover the full span from D-75 (the planning
@@ -84,10 +89,10 @@ def _intl_handler_covers_d75_through_std(
 
     Both bounds in ops-day minutes (handles N's midnight wrap via
     ``std_to_ops_day_minutes``)."""
-    nominal = SHIFT_NOMINAL_MIN.get(staff_shift)
-    if nominal is None:
+    if staff_shift not in SHIFT_NOMINAL_MIN:
         return False
-    start_min, end_min = nominal
+    # A ZC's own hours when they differ from the shift's (2026-10-16).
+    start_min, end_min = hours_for(staff_shift, role)
     std_min = std_to_ops_day_minutes(flight_std, flight_date, ops_day)
     d75_min = std_min - _D75_OFFSET_MIN
     return start_min <= d75_min and std_min <= end_min
@@ -122,6 +127,9 @@ class ExcludeReason(StrEnum):
     OVERRIDE_CUTOFF = "STD past staff's per-day STD cutoff (H11)"
     ZC_END_CUTOFF = (
         "ZC takes no flight in the last hour of their shift (H21)"
+    )
+    ZC_START_CUTOFF = (
+        "ZC does no flight work in the first hour of their shift (H21)"
     )
     NEWBIE_INTERNATIONAL = "newbies excluded from international flights (H12a)"
     INTL_SHIFT_EDGE = "international: staff within ±60 min of shift start/end (H12b — retired)"
@@ -190,6 +198,11 @@ class EligibilityContext:
     """H21: a ZC's flights must have STD <= nominal shift end minus this
     many minutes. 0 disables. Set from ``config.zc_cutoff``."""
 
+    zc_start_cutoff_min: int = 120
+    """H21 (2026-10-16): a ZC's flights must have STD >= nominal shift
+    start plus this many minutes — 60 free + the 60 of work before STD.
+    0 disables. From ``config.zc_cutoff``."""
+
 
 def check(
     flight: FlightInput, staff: StaffMember, ctx: EligibilityContext,
@@ -217,26 +230,36 @@ def check(
     # A flight is eligible for a shift only if its STD falls in that
     # shift's distribution window (M / M1 / N hard-bounded; A and A1
     # have a soft outer band that the solver penalizes via S_outer).
-    if not is_in_std_window(
-        flight.std, flight.date, ctx.ops_day, staff.shift_today,
+    # A ZC's window follows their own hours (Setup → ZC shift timings).
+    if not is_in_std_window_for(
+        flight.std, flight.date, ctx.ops_day, staff.shift_today, staff.role,
     ):
         return ExcludeReason.OUT_OF_SHIFT
-    # F5b (H21): ZCs get no flight in the last hour of their shift. The
-    # STD must be <= nominal shift end - zc_end_cutoff_min. P2F flights
-    # are exempt: F4 is the sole authority on who takes those, and a
-    # nominated ZC handler would otherwise leave a late P2F flight with
-    # zero eligible staff.
+    # F5b (H21): ZCs do no flight work in their first hour and take no
+    # flight in their last hour. Work starts an hour before STD, so the
+    # STD must be >= nominal start + zc_start_cutoff_min (120) and
+    # <= nominal end - zc_end_cutoff_min (60). P2F flights are exempt: F4 is
+    # the sole authority on who takes those, and a nominated ZC handler
+    # would otherwise leave an early or late P2F flight with zero
+    # eligible staff.
     if (
         staff.role == Role.ZC
-        and ctx.zc_end_cutoff_min > 0
+        and (ctx.zc_end_cutoff_min > 0 or ctx.zc_start_cutoff_min > 0)
         and flight.ops_class != OpsClass.P2F
     ):
-        nominal = SHIFT_NOMINAL_MIN.get(staff.shift_today)
+        nominal = (
+            hours_for(staff.shift_today, staff.role)
+            if staff.shift_today in SHIFT_NOMINAL_MIN else None
+        )
         if nominal is not None:
             std_min = std_to_ops_day_minutes(
                 flight.std, flight.date, ctx.ops_day,
             )
-            if std_min > nominal[1] - ctx.zc_end_cutoff_min:
+            if (ctx.zc_start_cutoff_min > 0
+                    and std_min < nominal[0] + ctx.zc_start_cutoff_min):
+                return ExcludeReason.ZC_START_CUTOFF
+            if (ctx.zc_end_cutoff_min > 0
+                    and std_min > nominal[1] - ctx.zc_end_cutoff_min):
                 return ExcludeReason.ZC_END_CUTOFF
     # F6: P2F handler buffer (H4, user direction 2026-09-26). For each
     # P2F flight the handler runs, no normal flight from 2 hrs before
@@ -285,7 +308,7 @@ def check(
     # No buffer, no fallback (per user direction). Replaces the retired
     # F9 INTL_SHIFT_EDGE rule.
     if flight.is_international and not _intl_handler_covers_d75_through_std(
-        staff.shift_today, flight.std, flight.date, ctx.ops_day,
+        staff.shift_today, flight.std, flight.date, ctx.ops_day, staff.role,
     ):
         return ExcludeReason.INTL_SHIFT_COVERAGE
     # F10 (H20): the staff member nominated as *their own shift's* P2F

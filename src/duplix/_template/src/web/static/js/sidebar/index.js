@@ -114,6 +114,20 @@ export const template = `
           <button id="shift-times-reset" class="ghost" type="button">Reset to defaults</button>
           <span class="form-status" id="shift-times-status"></span>
         </form>
+        <h4 class="shift-times-subhead">Zone Controllers
+          <span class="subdued" id="zc-shift-times-current"></span></h4>
+        <p class="subdued">
+          ZCs can work different hours from the staff on the same shift.
+          Until saved they follow the staff hours above. Their first flight
+          is 2 h after their start, their last 1 h before their end. Saved
+          to <code>configs/zc_shift_times.json</code>.
+        </p>
+        <form id="zc-shift-times-form" autocomplete="off" novalidate>
+          <div class="shift-times-grid" id="zc-shift-times-grid"></div>
+          <button id="zc-shift-times-save" class="primary" type="submit">Save</button>
+          <button id="zc-shift-times-reset" class="ghost" type="button">Same as staff</button>
+          <span class="form-status" id="zc-shift-times-status"></span>
+        </form>
         </div>
       </details>
 
@@ -307,9 +321,6 @@ async function removeAirport(btn) {
 
 /* ---- shift timings -------------------------------------------------- */
 
-const setShiftTimesStatus = (message, ok) =>
-  setStatus("#shift-times-status", message, ok);
-
 /** The last payload from the server: `{shifts, defaults, customised}`. */
 let shiftTimes = null;
 
@@ -347,9 +358,9 @@ function updateShiftLength(row) {
   );
 }
 
-function renderShiftTimes(payload) {
-  shiftTimes = payload;
-  const rows = Object.entries(payload.shifts).map(([shift, { start, end }]) => {
+/** One editable hours table (staff or ZC). */
+function shiftTableHtml(shifts) {
+  const rows = Object.entries(shifts).map(([shift, { start, end }]) => {
     const s = escapeHTML(shift);
     const field = (edge, value) => `
       <td><input type="text" inputmode="numeric" maxlength="5"
@@ -362,7 +373,7 @@ function renderShiftTimes(payload) {
         <td class="shift-length subdued">${shiftLength(shift, start, end)}</td>
       </tr>`;
   }).join("");
-  $("#shift-times-grid").innerHTML = `
+  return `
     <table class="shift-times-table">
       <thead><tr>
         <th scope="col">Shift</th><th scope="col">Start</th>
@@ -370,9 +381,20 @@ function renderShiftTimes(payload) {
       </tr></thead>
       <tbody>${rows}</tbody>
     </table>`;
+}
+
+function renderShiftTimes(payload) {
+  shiftTimes = payload;
+  $("#shift-times-grid").innerHTML = shiftTableHtml(payload.shifts);
   $("#shift-times-current").textContent =
     payload.customised ? "Customised" : "Default";
   $("#shift-times-reset").disabled = !payload.customised;
+  if (payload.zc) {
+    $("#zc-shift-times-grid").innerHTML = shiftTableHtml(payload.zc.shifts);
+    $("#zc-shift-times-current").textContent =
+      payload.zc.customised ? "· own hours" : "· same as staff";
+    $("#zc-shift-times-reset").disabled = !payload.zc.customised;
+  }
   // The trend chart paints its shift bands from these.
   if (payload.windows_min) setShiftWindows(payload.windows_min);
 }
@@ -389,12 +411,15 @@ export async function syncShiftWindows() {
   if (payload?.windows_min) setShiftWindows(payload.windows_min);
 }
 
-function initShiftTimesForm() {
-  const form = $("#shift-times-form");
+/** Wire one hours form. ``current`` reads the saved hours to compare
+ *  against; ``resetText`` is the confirm-dialog wording. */
+function wireShiftForm({ prefix, saveUrl, resetUrl, current, resetTitle, resetText, savedMsg, resetMsg }) {
+  const form = $(`#${prefix}-form`);
   if (!form) return;
+  const setMsg = (message, ok) => setStatus(`#${prefix}-status`, message, ok);
 
   // Delegated, so a re-render keeps working.
-  const grid = $("#shift-times-grid");
+  const grid = $(`#${prefix}-grid`);
   grid.addEventListener("input", (ev) => {
     const input = ev.target.closest("input[data-shift]");
     if (!input) return;
@@ -416,45 +441,61 @@ function initShiftTimesForm() {
       const { shift, edge } = input.dataset;
       (shifts[shift] ||= {})[edge] = normaliseClock(input.value);
     }
+    const saved = current();
     const unchanged = Object.entries(shifts).every(([shift, { start, end }]) =>
-      shiftTimes?.shifts[shift]?.start === start
-      && shiftTimes?.shifts[shift]?.end === end);
+      saved?.[shift]?.start === start && saved?.[shift]?.end === end);
     if (unchanged) {
-      setShiftTimesStatus("Nothing changed.", true);
+      setMsg("Nothing changed.", true);
       return;
     }
-    const btn = $("#shift-times-save");
+    const btn = $(`#${prefix}-save`);
     btn.disabled = true;
-    setShiftTimesStatus("Saving…", true);
+    setMsg("Saving…", true);
     try {
-      renderShiftTimes(await post("/api/shift_times", { shifts }));
-      setShiftTimesStatus(
-        "Saved. Re-run Plan, then Allocate, to use the new hours.", true,
-      );
+      renderShiftTimes(await post(saveUrl, { shifts }));
+      setMsg(savedMsg, true);
     } catch (e) {
-      setShiftTimesStatus(e.message || "Save failed.", false);
+      setMsg(e.message || "Save failed.", false);
     } finally {
       btn.disabled = false;
     }
   });
 
-  $("#shift-times-reset").addEventListener("click", async () => {
-    const ok = await confirmModal(
-      "Reset shift timings?",
-      "Every shift goes back to its shipped start and end. The change is "
-        + "used from the next Plan / Allocate run.",
-      "Reset",
-    );
+  $(`#${prefix}-reset`).addEventListener("click", async () => {
+    const ok = await confirmModal(resetTitle, resetText, "Reset");
     if (!ok) return;
-    setShiftTimesStatus("Resetting…", true);
+    setMsg("Resetting…", true);
     try {
-      renderShiftTimes(await post("/api/shift_times/reset", {}));
-      setShiftTimesStatus(
-        "Back to the shipped hours. Re-run Plan, then Allocate.", true,
-      );
+      renderShiftTimes(await post(resetUrl, {}));
+      setMsg(resetMsg, true);
     } catch (e) {
-      setShiftTimesStatus(e.message || "Reset failed.", false);
+      setMsg(e.message || "Reset failed.", false);
     }
+  });
+}
+
+function initShiftTimesForm() {
+  wireShiftForm({
+    prefix: "shift-times",
+    saveUrl: "/api/shift_times",
+    resetUrl: "/api/shift_times/reset",
+    current: () => shiftTimes?.shifts,
+    resetTitle: "Reset shift timings?",
+    resetText: "Every shift goes back to its shipped start and end. The change is "
+      + "used from the next Plan / Allocate run.",
+    savedMsg: "Saved. Re-run Plan, then Allocate, to use the new hours.",
+    resetMsg: "Back to the shipped hours. Re-run Plan, then Allocate.",
+  });
+  wireShiftForm({
+    prefix: "zc-shift-times",
+    saveUrl: "/api/zc_shift_times",
+    resetUrl: "/api/zc_shift_times/reset",
+    current: () => shiftTimes?.zc?.shifts,
+    resetTitle: "Zone Controllers back to the staff hours?",
+    resetText: "ZCs will follow the staff shift hours again. The change is "
+      + "used from the next Plan / Allocate run.",
+    savedMsg: "Saved. Re-run Plan, then Allocate, to use the ZC hours.",
+    resetMsg: "ZCs follow the staff hours again. Re-run Plan, then Allocate.",
   });
 }
 

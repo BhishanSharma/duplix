@@ -64,6 +64,7 @@ from .eligibility import sheet_target_for
 from .windows import (
     HANDOVER_WINDOW_MIN,
     SHIFT_NOMINAL_MIN,
+    hours_for,
     SpacingKey,
     spacing_clear,
     spacing_key,
@@ -161,8 +162,9 @@ def plan_relief(
         return f is not None and f.ops_class != OpsClass.P2F and not f.is_international
 
     def cutoff_for(s: StaffMember) -> int | None:
-        nominal = SHIFT_NOMINAL_MIN.get(s.shift_today) if s.shift_today else None
-        return None if nominal is None else nominal[1] - free_early_min
+        if s.shift_today not in SHIFT_NOMINAL_MIN:
+            return None
+        return hours_for(s.shift_today, s.role)[1] - free_early_min
 
     def late_uids(sid: str, cutoff: int) -> list[str]:
         return sorted(
@@ -285,7 +287,7 @@ def plan_relief(
         """Most feasible backup reliever for ``s`` (an A person with no N
         reliever left): not already relieving anyone, then fewest of their
         own flights in ``s``'s handover window, then lightest workload."""
-        end = SHIFT_NOMINAL_MIN[s.shift_today][1]
+        end = hours_for(s.shift_today, s.role)[1]
         lo, hi = end - HANDOVER_LEAD_MIN, end + HANDOVER_WINDOW_MIN
         duties: dict[str, int] = defaultdict(int)
         for rid in plan.reliever_of.values():
@@ -402,7 +404,7 @@ def plan_relief(
                 s = staff_by_id[sid]
                 if s.shift_today is None or (RELIEF_SHIFT.get(s.shift_today), s.role) != (relief_shift, role):
                     continue
-                end = SHIFT_NOMINAL_MIN[s.shift_today][1]
+                end = hours_for(s.shift_today, s.role)[1]
                 for mins in (free_early_min * 3 // 4, free_early_min // 2, free_early_min // 4):
                     if mins < 10:
                         continue
@@ -428,7 +430,7 @@ def plan_relief(
         plan.note(rid, f"Relieves: {staff_by_id[sid].name}")
     for sid, cut in plan.freed.items():
         s = staff_by_id[sid]
-        end = SHIFT_NOMINAL_MIN[s.shift_today][1]
+        end = hours_for(s.shift_today, s.role)[1]
         plan.note(
             sid,
             f"No reliever available — released early: no flights after "
@@ -456,6 +458,6 @@ def plan_relief(
     return new_rows, plan
 
 
-def relief_window_start(shift: ShiftCode) -> int:
+def relief_window_start(shift: ShiftCode, role: object = None) -> int:
     """Ops-day minute from which a flight counts as handed to the reliever."""
-    return SHIFT_NOMINAL_MIN[shift][1] - HANDOVER_LEAD_MIN
+    return hours_for(shift, role)[1] - HANDOVER_LEAD_MIN

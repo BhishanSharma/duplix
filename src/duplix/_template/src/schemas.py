@@ -646,6 +646,7 @@ class OpsBoundary(StrEnum):
     N_TO_M = "N->M"
     M_TO_M1 = "M->M1"
     M_TO_A = "M->A"
+    M1_TO_A = "M1->A"  # M1 helps plan A's first flights when M is short
     M1_TO_A1 = "M1->A1"
     A_TO_N = "A->N"
     A_TO_A1 = "A->A1"  # handover-only routing for A surplus

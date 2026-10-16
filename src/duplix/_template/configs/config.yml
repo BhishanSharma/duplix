@@ -231,13 +231,17 @@ break_pass:
 relief_pass:
   free_early_minutes: 60
 
-# ---------- ZC end-of-shift cutoff (H21) ----------
+# ---------- ZC start / end-of-shift cutoff (H21) ----------
 # Zone controllers get no normal flight in the last N minutes of their
 # shift: STD must be <= nominal shift end - N (M ZC: nothing after 11:30,
-# A ZC: nothing after 20:00, N ZC: nothing after 04:00). Hard rule in the
-# eligibility matrix, so the solver and every post-pass honour it. P2F
-# flights are exempt. 0 disables.
+# A ZC: nothing after 20:00, N ZC: nothing after 04:00).
+# They also do no flight work in their first hour. Work on a flight
+# starts an hour before STD, so their first STD is shift start + 120:
+# M ZC 06:00, M1 08:00, A 14:30, A1 16:30, N 22:30.
+# Hard rule in the eligibility matrix, so the solver and every post-pass
+# honour it. P2F flights are exempt. 0 disables either side.
 zc_cutoff:
+  minutes_after_shift_start: 120
   minutes_before_shift_end: 60
 
 # ---------- GULF routing (2026-05-19) ----------

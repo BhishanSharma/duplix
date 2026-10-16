@@ -27,6 +27,7 @@ group within 0–2 flights of each other, and 4–5 squeezed flights.
 | Each day | Upload the flight schedule, pick Zone Controllers, check P2F handlers | Dashboard |
 | New or dropped international route | Add / remove the airport code | Setup → international airports (`io.sv_portal.international_airport_codes`) |
 | Shift hours change | Edit the hours | Setup → shift times (`configs/shift_times.json`) |
+| Zone Controllers work different hours | Edit the ZC table (until saved, ZCs follow the staff hours) | Setup → shift times → Zone Controllers (`configs/zc_shift_times.json`) |
 | Workload targets change | Preferred / acceptable / hard cap per shift and role | Setup (`configs/shift_limits.json`) |
 | SV export renames a column | Add the new name | `io.sv_portal.columns` in `configs/config.yml` |
 | New year | Nothing — roster years are worked out from the weekday and the file's date. Only if a roster reads wrong, force one with `allocation: {cycle_year: 2027}` | `configs/config.yml` |

@@ -108,6 +108,8 @@ rosters and override rows stay. Set
   hard cap flights (also editable in Setup).
 * `configs/shift_times.json` — written by Setup when shift hours are
   changed; absent means the hours built into `src/allocator/windows.py`.
+* `configs/zc_shift_times.json` — Zone Controllers' own hours, written by
+  Setup; absent means ZCs follow the staff hours.
 
 ## Tests
 

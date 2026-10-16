@@ -77,6 +77,7 @@ H6_PREPLAN_COUNTS: dict[OpsBoundary, int] = {
     OpsBoundary.N_TO_M: 1,
     OpsBoundary.M_TO_M1: 1,
     OpsBoundary.M_TO_A: 2,
+    OpsBoundary.M1_TO_A: 2,
     OpsBoundary.M1_TO_A1: 2,
     OpsBoundary.A_TO_N: 3,
     OpsBoundary.A1_TO_N: 0,
@@ -338,7 +339,12 @@ def relabel_pair_columns(
         visible_pos = 0
         for r in fl_rows:
             uid = _row_uid(r)
-            if r.is_international:
+            # INTL and P2F rows keep their own labels, so they don't
+            # use up the partner's planning slots (2026-10-16).
+            f_pos = flight_by_uid.get(uid)
+            if r.is_international or (
+                f_pos is not None and f_pos.ops_class == _OC.P2F
+            ):
                 position_by_key[(sid, uid)] = -1
                 continue
             position_by_key[(sid, uid)] = visible_pos
@@ -369,7 +375,7 @@ def relabel_pair_columns(
             ]
             if not plain:
                 continue
-            start = relief_window_start(s0.shift_today)
+            start = relief_window_start(s0.shift_today, s0.role)
             hand = [
                 r for r in plain
                 if std_to_ops_day_minutes(r.std, r.date, ops_day) >= start

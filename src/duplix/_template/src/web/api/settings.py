@@ -96,6 +96,12 @@ def register(router: Router) -> None:
             "defaults": shift_hours.to_clock(shipped),
             "windows_min": {s: list(live[s]) for s in shift_hours.SHIFTS},
             "customised": dict(live) != dict(shipped),
+            # Zone Controllers' own hours (2026-10-16); while not
+            # customised they are the staff hours above.
+            "zc": {
+                "shifts": shift_hours.to_clock(windows.ZC_NOMINAL_MIN),
+                "customised": windows.zc_hours_customised(),
+            },
         }
 
     @router.get("/api/shift_times")
@@ -117,6 +123,30 @@ def register(router: Router) -> None:
         except ValueError as exc:
             return bad_request(str(exc))
         windows.apply_shift_hours(hours)
+        return json_response(_shift_times_payload())
+
+    @router.post("/api/zc_shift_times")
+    def set_zc_shift_times(req: Request) -> Response:
+        """Saves the Zone Controllers' own hours to
+        configs/zc_shift_times.json and applies them in place."""
+        if runner.is_running():
+            return conflict({"error": "a run is in progress — wait for it to finish"})
+        from ...allocator import shift_hours, windows
+        try:
+            hours = shift_hours.save_zc(req.json().get("shifts"))
+        except ValueError as exc:
+            return bad_request(str(exc))
+        windows.apply_zc_hours(hours)
+        return json_response(_shift_times_payload())
+
+    @router.post("/api/zc_shift_times/reset")
+    def reset_zc_shift_times(_req: Request) -> Response:
+        """Drops the ZC hours; ZCs follow the staff hours again."""
+        if runner.is_running():
+            return conflict({"error": "a run is in progress — wait for it to finish"})
+        from ...allocator import shift_hours, windows
+        shift_hours.clear_zc()
+        windows.apply_zc_hours(None)
         return json_response(_shift_times_payload())
 
     @router.post("/api/shift_times/reset")

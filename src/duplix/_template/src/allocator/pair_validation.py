@@ -77,12 +77,34 @@ def validate_pair_discrepancies(
         if p.next_employee_id is not None:
             by_role[(p.boundary, "next", p.next_employee_id, p.next_name or "")].append(p)
 
+    # Shared planners (2026-10-16): when the next shift is bigger, some
+    # previous-shift people plan for two. Sanctioned up to the fair share.
+    sizes: dict[OpsBoundary, tuple[set[str], set[str]]] = defaultdict(
+        lambda: (set(), set()),
+    )
+    for p in pairs:
+        if p.preplan_count > 0 and p.prev_employee_id and p.next_employee_id:
+            sizes[p.boundary][0].add(p.prev_employee_id)
+            sizes[p.boundary][1].add(p.next_employee_id)
+
+    def _shared_planner(boundary: OpsBoundary, group: list[Pair]) -> bool:
+        prev_ids, next_ids = sizes.get(boundary, (set(), set()))
+        if not prev_ids or len(next_ids) <= len(prev_ids):
+            return False
+        fair = -(-len(next_ids) // len(prev_ids))       # ceil
+        return len(group) <= fair and all(p.preplan_count > 0 for p in group)
+
     out: list[WarningRow] = []
     for (boundary, side, emp_id, emp_name), group in by_role.items():
         if len(group) <= 1:
             continue
+        # M1 helping A is sanctioned (see ``m1_help_notes``).
+        if boundary == OpsBoundary.M1_TO_A:
+            continue
         # Sanctioned A→N split-1+2 exception.
         if boundary == OpsBoundary.A_TO_N and _is_a_to_n_split(group):
+            continue
+        if side == "prev" and _shared_planner(boundary, group):
             continue
         opposite_side = "next" if side == "prev" else "prev"
         partners = _format_partners(group, opposite_side)
@@ -105,4 +127,80 @@ def validate_pair_discrepancies(
     return out
 
 
-__all__ = ["validate_pair_discrepancies"]
+def shared_planner_notes(pairs: list[Pair], d_day: date_t) -> list[WarningRow]:
+    """One INFO line per boundary where previous-shift people plan the
+    first flights of two next-shift people (next shift bigger)."""
+    by_prev: dict[tuple[OpsBoundary, str], list[Pair]] = defaultdict(list)
+    for p in pairs:
+        if (p.preplan_count > 0 and p.prev_employee_id and p.next_employee_id
+                and p.boundary != OpsBoundary.M1_TO_A):
+            by_prev[(p.boundary, p.prev_employee_id)].append(p)
+    lines: dict[OpsBoundary, list[str]] = defaultdict(list)
+    for (boundary, _), group in by_prev.items():
+        names = sorted({p.next_name or p.next_employee_id or "" for p in group})
+        if len(names) > 1:
+            listed = " & ".join(names[:4])
+            if len(names) > 4:
+                listed += f" (+{len(names) - 4} more)"
+            lines[boundary].append(f"{group[0].prev_name} -> {listed}")
+    out: list[WarningRow] = []
+    for boundary, items in sorted(lines.items(), key=lambda kv: kv[0].value):
+        head = (
+            f"{boundary.value}: the next shift has more people than the "
+            f"previous one, so {len(items)} planner(s) plan the first "
+            f"flights of more than one person: "
+        )
+        # Warning text is capped at 500 characters: list as many as fit.
+        shown: list[str] = []
+        for item in sorted(items):
+            more = len(items) - len(shown) - 1
+            tail = f"; and {more} more (see Pair_Map)" if more else ""
+            if len(head) + len("; ".join([*shown, item])) + len(tail) > 480:
+                break
+            shown.append(item)
+        rest = len(items) - len(shown)
+        message = head + "; ".join(shown)
+        if rest:
+            message += f"{'; ' if shown else ''}and {rest} more (see Pair_Map)"
+        out.append(WarningRow(
+            severity=Severity.INFO, code="W216", date=d_day, message=message,
+        ))
+    return out
+
+
+def m1_help_notes(pairs: list[Pair], d_day: date_t) -> list[WarningRow]:
+    """One INFO line when M1 people plan some of A's first flights
+    because M could not cover them all (2026-10-16)."""
+    help_ = [
+        p for p in pairs
+        if p.boundary == OpsBoundary.M1_TO_A and p.preplan_count > 0
+        and p.prev_employee_id and p.next_employee_id
+    ]
+    if not help_:
+        return []
+    flights = sum(p.preplan_count for p in help_)
+    helpers = {p.prev_employee_id for p in help_}
+    head = (
+        f"M1->A: M could not plan every A flight that departs before its "
+        f"holder's shift starts, so {len(helpers)} M1 person(s) plan "
+        f"{flights} of them: "
+    )
+    items = sorted(
+        f"{p.prev_name} -> {p.next_name}"
+        + (f" ({p.preplan_count})" if p.preplan_count > 1 else "")
+        for p in help_
+    )
+    shown: list[str] = []
+    for item in items:
+        if len(head) + len("; ".join([*shown, item])) + 40 > 480:
+            break
+        shown.append(item)
+    message = head + "; ".join(shown)
+    if len(shown) < len(items):
+        message += f"; and {len(items) - len(shown)} more (see Pair_Map)"
+    return [WarningRow(
+        severity=Severity.INFO, code="W217", date=d_day, message=message,
+    )]
+
+
+__all__ = ["m1_help_notes", "shared_planner_notes", "validate_pair_discrepancies"]

@@ -32,7 +32,7 @@ from ..schemas import FlightInput, OpsClass, Role, StaffMember
 from .caps import hard_cap_for, preferred_target_for
 from .eligibility import EligibilityContext, check as elig_check
 from .windows import (
-    is_in_std_window,
+    is_in_std_window_for,
     required_spacing_min,
     spacing_key,
     std_to_ops_day_minutes,
@@ -84,7 +84,9 @@ def _tier(
 ) -> int:
     if ctx is not None and elig_check(flight, s, ctx) is None:
         return 0
-    in_window = is_in_std_window(flight.std, flight.date, ops_day, s.shift_today)
+    in_window = is_in_std_window_for(
+        flight.std, flight.date, ops_day, s.shift_today, s.role,
+    )
     if flight.ops_class == OpsClass.P2F:
         if in_window and s.is_p2f_licensed and s.shift_today in ("M", "A", "N"):
             return 1
@@ -106,6 +108,7 @@ def force_place_remaining(
     ops_day: date_t,
     elig_ctx: EligibilityContext | None = None,
     max_std_by_staff: dict[str, int] | None = None,
+    self_plan=None,
 ) -> list[ForcedPlacement]:
     """Place every flight in ``leftovers``; returns what was forced.
 
@@ -162,11 +165,20 @@ def force_place_remaining(
             # N ~19, STAFF ~22), not the raw count — otherwise ZCs and
             # N staff always look "least loaded" next to day STAFF.
             load = count[s.employee_id] - targets[s.employee_id]
-            rank = (tier, late, over, shortfall, load, s.employee_id)
+            # No planner for a flight before they arrive: relaxed only
+            # when every other option breaks a rule too (2026-10-16).
+            unplanned = bool(
+                self_plan is not None
+                and not self_plan.ok(
+                    s.employee_id, f.unique_id,
+                    [f2.unique_id for f2, _ in mine[s.employee_id]],
+                )
+            )
+            rank = (tier, late, over, shortfall, unplanned, load, s.employee_id)
             if best is None or rank < best[0]:
-                best = (rank, s, tier, over, shortfall, why_space, cap)
+                best = (rank, s, tier, over, shortfall, why_space, cap, unplanned)
         assert best is not None
-        _, s, tier, over, shortfall, why_space, cap = best
+        _, s, tier, over, shortfall, why_space, cap, unplanned = best
 
         notes: list[str] = []
         if tier:
@@ -176,6 +188,12 @@ def force_place_remaining(
         if over:
             notes.append(
                 f"over cap: {count[s.employee_id] + 1}/{cap} flights"
+            )
+        if unplanned:
+            notes.append(
+                "no planner: departs before "
+                f"{self_plan.latest_self_planned(s.employee_id)}, "
+                "planned before their shift starts"
             )
         out.append(ForcedPlacement(f, s.employee_id, s.name, notes))
 

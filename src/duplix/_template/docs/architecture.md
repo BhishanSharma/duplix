@@ -43,7 +43,8 @@ src/
 
   allocator/               building blocks used by Allocate
     windows.py             shift hours, STD windows, spacing rules, time helpers
-    shift_hours.py         editable shift hours (configs/shift_times.json)
+    shift_hours.py         editable shift hours (configs/shift_times.json,
+                           ZC hours in configs/zc_shift_times.json)
     caps.py                per-(shift, role) workload bands and caps
     eligibility.py         the hard who-may-take-what filters
     p2f_autofill.py        fill missing P2F handlers from the licence column
@@ -88,7 +89,8 @@ src/
     static/                index.html, js/ (core, ui, views, charts, panels,
                            sidebar) and css/ (partials listed in styles.css)
 
-configs/                   config.yml, shift_limits.json, shift_times.json
+configs/                   config.yml, shift_limits.json, shift_times.json,
+                           zc_shift_times.json
 data/                      saved rosters, ZC lists, relief history (git-ignored)
 tests/                     pytest suite
 docs/                      this documentation

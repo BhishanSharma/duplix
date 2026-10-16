@@ -20,6 +20,39 @@ N. AM staff never take flights. Then the overrides: `sick` and
 the `p2f` override rows, and — when a shift still needs more (one per 8 P2F
 flights) — staff on that shift whose licence column says P2F.
 
+**Handover pairs** (`pairings.py`). At each shift change (M→M1, M→A,
+M1→A1, A→N) people are paired 1-to-1 in roster order: the earlier shift's
+person plans the first flights of their partner that depart before the
+partner's shift starts (planned 75 min ahead: 1 flight at M→M1, 2 at M→A
+and M1→A1, 3 at A→N).
+
+* Next shift **bigger** (M 35, A 39): the 4 extra A people share a
+  planner — 4 M people plan for two, spread so nobody plans for more than
+  their share, P2F handlers last. Listed as W216 (info).
+* **M1 helps A** (`M1->A` pairs). M1 is mid-shift when A's first flights
+  are planned, so when M is short each M1 person takes one extra A person
+  before any M person plans for two. After the solver, an A person who
+  holds more early flights than their M planner covers (a third flight
+  before 13:45) gets an M1 planner for it — someone not on break at the
+  planning time, at most 2 A flights per M1
+  person. Listed as W217 (info); "Planned by" shows the M1 name.
+* Next shift **smaller** at A→N: extra A people hand over to A1, then
+  share an N person (planning split 2 + 1).
+* At the **end** of a shift the reverse applies — see Relief below.
+
+A flight whose 75-minute planning time already falls inside the person's
+own shift (e.g. a P2F handler's first normal flight after the P2F block)
+needs no partner: they plan it themselves.
+
+**Self-plan rule** (`self_plan.py`, M1 / A / A1 / N). A flight that must
+be planned before its holder arrives (departs earlier than shift start +
+75 min, e.g. before 13:45 for A) is held only if their partner plans it.
+Beyond the partner's count, or with no partner at all (a whole previous
+shift missing), the flight is taken off them and re-placed by the repair
+pass with this rule applied (after M1 help, above). Force-place breaks it only as a last resort
+(after spacing), flagged "no planner" in W230. INTL and P2F flights are
+exempt; M is not covered (its planners are the previous night's N).
+
 ## 2. Eligibility (hard rules)
 
 A person may take a flight only if all of these hold
@@ -33,7 +66,7 @@ A person may take a flight only if all of these hold
 | Handlers and INTL (H20) | a shift's P2F handler takes no normal international flight |
 | INTL coverage | for an international departure, their shift covers STD − 75 min through STD |
 | Newbies | no international flights |
-| ZC end of shift (H21) | a ZC takes no normal flight in the last 60 min of their shift (`zc_cutoff`) |
+| ZC start / end of shift (H21) | a ZC does no flight work in their first hour (work starts 1 h before STD, so first STD = start + 2 h) and takes nothing in their last hour (`zc_cutoff`): M 06:00–11:30, M1 08:00–13:30, A 14:30–20:00, A1 16:30–22:00, N 22:30–04:00 with the staff hours. ZCs can have their own hours (Setup → Shift timings → Zone Controllers); then all of this, their flight window, report buffers, break, early release and planning follow the ZC hours |
 | Per-staff window (H11) | inside their `cutoff_time` override, if any |
 
 A flight nobody is eligible for skips the solver (W201) and goes straight
@@ -99,7 +132,9 @@ raised.
    are released 60 min early (no flights then), rotating day to day.
 5. **Break** (`postpass_break.py`) — a 30-min mid-shift break for
    everyone, made by 1-for-1 swaps only (counts don't change).
-6. **Repair** (`repair.py`) — for each flight still without a person,
+6. **Repair** (`repair.py`) — first, flights that break the self-plan
+   rule (above) are taken off their holder. Then, for each flight still
+   without a person,
    look for a short chain of moves that frees someone: A takes the
    flight, A's clashing flight goes to B, B's to C (up to 3 hops). A chain
    is kept only if every step keeps eligibility, spacing, caps, early
@@ -153,5 +188,6 @@ peaks have none — the card says so explicitly.
 | Solver time budget | `solver.max_seconds` in `configs/config.yml` |
 | Bands and caps per shift / role | `configs/shift_limits.json` or Setup |
 | Shift hours | Setup (saved to `configs/shift_times.json`) |
+| Zone Controller hours | Setup → Shift timings → Zone Controllers (`configs/zc_shift_times.json`; absent = same as staff) |
 | Break length, early-release minutes, ZC cut-off | `break_pass`, `relief_pass`, `zc_cutoff` in `config.yml` |
 | Objective weights | constants at the top of `src/solver/allocator_cpsat.py` |

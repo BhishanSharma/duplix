@@ -83,6 +83,7 @@ def apply_rebalance_pass(
     max_std_by_staff: dict[str, int] | None = None,
     blocked_windows: dict[str, tuple[int, int]] | None = None,
     frozen_uids: "frozenset[str] | set[str]" = frozenset(),
+    extra_ok=None,
 ) -> tuple[list[AllocationRow], RebalanceSummary]:
     """Level workload within each (shift, role) bucket by transferring
     flights from the most- to the least-loaded staff. Returns updated
@@ -93,7 +94,8 @@ def apply_rebalance_pass(
     released early -> latest STD they may hold), ``blocked_windows``
     (staff -> their secured break window) and ``frozen_uids`` (rows that
     must not move, e.g. force-placed ones) keep it from undoing the
-    relief, break and force-place passes.
+    relief, break and force-place passes. ``extra_ok(eid, uid, held)``
+    is one more rule a recipient must pass (``SelfPlanRule.ok``).
     """
     _max_std = max_std_by_staff or {}
     _blocked = blocked_windows or {}
@@ -199,6 +201,12 @@ def apply_rebalance_pass(
                         f_entry = spacing_key(f, d_day)
                         if not spacing_clear(
                             f_entry, staff_stds.get(recipient_id, ()),
+                        ):
+                            continue
+                        if extra_ok is not None and not extra_ok(
+                            recipient_id, uid,
+                            [u for u, st2 in rstate.items()
+                             if st2["staff_id"] == recipient_id],
                         ):
                             continue
 

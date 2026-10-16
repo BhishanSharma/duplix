@@ -243,6 +243,7 @@ def _suggestions_for_flight(
                 extra_p2f_handlers_by_shift=elig_ctx.extra_p2f_handlers_by_shift,
                 p2f_flight_minutes_by_handler={},  # blank → no buffer
                 zc_end_cutoff_min=elig_ctx.zc_end_cutoff_min,
+                zc_start_cutoff_min=elig_ctx.zc_start_cutoff_min,
             )
             reason = elig_check(flight, s, elig_no_buffer)
             if reason is None:

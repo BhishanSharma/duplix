@@ -11,3 +11,4 @@ excel/
 
 # Written by the Setup sidebar when shift hours are changed (local)
 configs/shift_times.json
+configs/zc_shift_times.json

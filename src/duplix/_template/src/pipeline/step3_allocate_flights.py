@@ -897,6 +897,7 @@ def run(
         p2f_flight_minutes_by_handler=p2f_anchors,
         skip_p2f_buffer_pairs=frozenset(skip_p2f_buffer_pairs),
         zc_end_cutoff_min=config.zc_cutoff.minutes_before_shift_end,
+        zc_start_cutoff_min=config.zc_cutoff.minutes_after_shift_start,
     )
 
     # --- Eligibility matrix + zero-eligibility check (W201) ----------
@@ -970,8 +971,13 @@ def run(
         # partners at the same boundary — flag everything except the
         # sanctioned A→N split-1+2 pattern. W215 warnings flow into
         # OUT_Warnings + the dashboard panel.
-        from ..allocator.pair_validation import validate_pair_discrepancies
+        from ..allocator.pair_validation import (
+            shared_planner_notes,
+            validate_pair_discrepancies,
+        )
         warnings.extend(validate_pair_discrepancies(pairs, d_day))
+        # Next shift bigger than the previous: say who plans for two.
+        warnings.extend(shared_planner_notes(pairs, d_day))
     except PairGenerationError as e:
         warnings.append(WarningRow(
             severity=Severity.ERROR, code="W211", message=str(e),
@@ -1503,6 +1509,53 @@ def run(
         )
 
     _all_flights = list(flights) + list(zero_elig_flights)
+
+    # Self-plan rule (2026-10-16, user direction): a flight that must be
+    # planned before its holder's shift starts needs their handover
+    # planner; beyond what the planner covers (or with no planner at all)
+    # the holder can't take it. Such flights are taken off here and
+    # placed again by repair below, which respects the rule; force-place
+    # relaxes it only as a last resort (flagged "no planner"). Skipped on
+    # a pinned re-run, which must not move placed flights.
+    from ..allocator.self_plan import SelfPlanRule, backup_planners
+    # M1 helps A (2026-10-16): A flights beyond what the M planner covers
+    # get an M1 planner first, so they stay where the solver put them.
+    _backup = backup_planners(
+        pairs, staff_today, _all_flights, d_day,
+        {_row_uid(r): r.staff_employee_id for r in rows if r.staff_employee_id},
+        avoid_ids=elig_ctx.all_p2f_handler_ids,
+        breaks=break_summary.breaks,
+    )
+    if _backup:
+        pairs = [*pairs, *_backup]
+        counts["PAIRS"] = len(pairs)
+        print(
+            f"  M1 helps A: {sum(p.preplan_count for p in _backup)} early A "
+            f"flight(s) planned by {len({p.prev_employee_id for p in _backup})} "
+            "M1 person(s)"
+        )
+    from ..allocator.pair_validation import m1_help_notes
+    warnings.extend(m1_help_notes(pairs, d_day))
+    _self_plan = SelfPlanRule(pairs, staff_today, _all_flights, d_day)
+    if not pin_prior:
+        _excess = set(_self_plan.excess({
+            _row_uid(r): r.staff_employee_id for r in rows if r.staff_employee_id
+        }))
+        if _excess:
+            for r in rows:
+                if _row_uid(r) in _excess:
+                    merged_workload_notes[r.staff_employee_id].append(
+                        f"Self-plan: FLT {r.flt} "
+                        f"({r.std.isoformat(timespec='minutes')}) moved — it "
+                        "would need planning before their shift starts and "
+                        "their planner's flights are already covered"
+                    )
+            rows = [r for r in rows if _row_uid(r) not in _excess]
+            print(
+                f"  Self-plan rule: {len(_excess)} flight(s) taken off people "
+                "with no planner for them; re-placed below"
+            )
+
     _placed = {_row_uid(r): r.staff_employee_id for r in rows if r.staff_employee_id}
     _leftover = [f for f in _all_flights if f.unique_id not in _placed]
 
@@ -1523,6 +1576,7 @@ def run(
             max_std_by_staff=relief_plan.freed,
             blocked_windows=break_summary.breaks,
             forbidden=_postpass_removed,
+            extra_ok=_self_plan.ok,
         )
         if _rep.placed or _rep.moved:
             _repaired = True
@@ -1569,6 +1623,7 @@ def run(
             _leftover, staff_today, _placed, _all_flights,
             ops_day=d_day, elig_ctx=elig_ctx,
             max_std_by_staff=relief_plan.freed,
+            self_plan=_self_plan,
         )
         _forced_assign = {fp.flight.unique_id: fp.employee_id for fp in _forced}
         _forced_rows = _assemble(
@@ -1634,6 +1689,7 @@ def run(
             max_std_by_staff=relief_plan.freed,
             blocked_windows=break_summary.breaks,
             frozen_uids=frozenset(_forced_uids),
+            extra_ok=_self_plan.ok,
         )
         if rebalance2.n_transfers:
             print(

@@ -34,7 +34,7 @@ Three-tier hierarchy at A→N:
 
 from __future__ import annotations
 
-from collections import defaultdict
+from collections import Counter, defaultdict
 
 from ..schemas import OpsBoundary, Pair, PairRole, Role, ShiftCode, StaffMember
 
@@ -46,6 +46,7 @@ _H6_DEFAULT_COUNTS: dict[OpsBoundary, int] = {
     OpsBoundary.N_TO_M: 1,
     OpsBoundary.M_TO_M1: 1,
     OpsBoundary.M_TO_A: 2,
+    OpsBoundary.M1_TO_A: 2,
     OpsBoundary.M1_TO_A1: 2,
     OpsBoundary.A_TO_N: 3,
     OpsBoundary.A1_TO_N: 0,
@@ -110,6 +111,88 @@ def _one_to_one(
         for i in range(n)
     ]
     return pairs, prev[n:], next_[n:]
+
+
+# Shift changes where the earlier shift plans the later shift's first
+# flights (N→M is cross-day and handled with yesterday's roster).
+_PLANNING_BOUNDARIES: tuple[tuple[OpsBoundary, ShiftCode, ShiftCode], ...] = (
+    (OpsBoundary.M_TO_M1, "M", "M1"),
+    (OpsBoundary.M_TO_A, "M", "A"),
+    (OpsBoundary.M1_TO_A1, "M1", "A1"),
+    (OpsBoundary.A_TO_N, "A", "N"),
+)
+
+# Shift that helps plan when the previous one is short: M1 for A.
+_HELPERS: dict[OpsBoundary, tuple[ShiftCode, OpsBoundary]] = {
+    OpsBoundary.M_TO_A: ("M1", OpsBoundary.M1_TO_A),
+}
+
+
+def _fill_missing_planners(
+    pairs: list[Pair],
+    by_today: dict[tuple[ShiftCode, Role], list[StaffMember]],
+    avoid_ids: set[str],
+) -> list[Pair]:
+    """Give every person still without a planner one from the shift before.
+
+    2026-10-16 (user report): when the next shift is bigger than the
+    previous one (M 35, A 39), the extra A people had nobody to plan the
+    first flights that depart before their shift starts. Same rule as the
+    N→M ZC exception: a previous-shift person may plan for more than one —
+    every first flight getting a planner beats nobody being reused.
+
+    Covers STAFF and ZC alike. Planners are spread evenly: fewest people
+    already planned for at this shift change first, then the same role,
+    then P2F handlers last, then roster order.
+
+    2026-10-16 (user direction): when M is short for A, M1 helps. M1 is
+    mid-shift when A's first flights are planned (M is in its last
+    minutes), so an M1 person with nobody to plan for yet is picked
+    before an M person takes a second A person (``M1->A`` pairs).
+    """
+    out: list[Pair] = []
+    for boundary, prev_sh, next_sh in _PLANNING_BOUNDARIES:
+        prev = by_today.get((prev_sh, Role.STAFF), []) + by_today.get((prev_sh, Role.ZC), [])
+        nxt = by_today.get((next_sh, Role.STAFF), []) + by_today.get((next_sh, Role.ZC), [])
+        helper = _HELPERS.get(boundary)
+        helpers = (
+            by_today.get((helper[0], Role.STAFF), []) + by_today.get((helper[0], Role.ZC), [])
+            if helper else []
+        )
+        if not (prev or helpers) or not nxt:
+            continue
+        here = [
+            p for p in [*pairs, *out]
+            if p.preplan_count > 0
+            and (p.boundary == boundary or (helper and p.boundary == helper[1]))
+        ]
+        planned = {p.next_employee_id for p in here}
+        load = Counter(p.prev_employee_id for p in here)
+        candidates = prev + helpers
+        is_helper = {s.employee_id for s in helpers}
+        order = {s.employee_id: i for i, s in enumerate(candidates)}
+        for n in nxt:
+            if n.employee_id in planned:
+                continue
+            pick = min(
+                candidates,
+                key=lambda s: (
+                    load[s.employee_id], s.employee_id in is_helper,
+                    s.role != n.role, s.employee_id in avoid_ids,
+                    order[s.employee_id],
+                ),
+            )
+            if pick.employee_id in is_helper:
+                out.append(_make_pair(
+                    pick, n, helper[1], PairRole.PRIMARY, helper[0], next_sh,
+                ))
+            else:
+                out.append(_make_pair(
+                    pick, n, boundary, PairRole.PRIMARY, prev_sh, next_sh,
+                ))
+            load[pick.employee_id] += 1
+            planned.add(n.employee_id)
+    return out
 
 
 def _n_to_m_cross_role(
@@ -453,26 +536,18 @@ def _generate_pairs_v2(
         # un-augmented yesterday's view, mirroring the default code.
         pairs.extend(_n_to_m_cross_role(by_yesterday, by_today))
 
-    # M→M1
-    m_to_m1_pairs, _, _ = _one_to_one(
-        staff_lists["M"], staff_lists["M1"],
-        OpsBoundary.M_TO_M1, PairRole.PRIMARY, "M", "M1",
-    )
-    pairs.extend(m_to_m1_pairs)
-
-    # M→A
-    m_to_a_pairs, _, _ = _one_to_one(
-        staff_lists["M"], staff_lists["A"],
-        OpsBoundary.M_TO_A, PairRole.PRIMARY, "M", "A",
-    )
-    pairs.extend(m_to_a_pairs)
-
-    # M1→A1
-    m1_to_a1_pairs, _, _ = _one_to_one(
-        staff_lists["M1"], staff_lists["A1"],
-        OpsBoundary.M1_TO_A1, PairRole.PRIMARY, "M1", "A1",
-    )
-    pairs.extend(m1_to_a1_pairs)
+    # M→M1, M→A, M1→A1: 1-to-1 (anyone left over is covered by
+    # ``_fill_missing_planners`` below).
+    for prev_sh, next_sh, boundary in (
+        ("M", "M1", OpsBoundary.M_TO_M1),
+        ("M", "A", OpsBoundary.M_TO_A),
+        ("M1", "A1", OpsBoundary.M1_TO_A1),
+    ):
+        one, _, _ = _one_to_one(
+            staff_lists[prev_sh], staff_lists[next_sh],
+            boundary, PairRole.PRIMARY, prev_sh, next_sh,
+        )
+        pairs.extend(one)
 
     # A→N: keep the 3-tier hierarchy for STAFF (orphan ZCs folded in
     # above appear at the END of the A-STAFF list, so primary pairs
@@ -489,6 +564,12 @@ def _generate_pairs_v2(
         preplan_count=0,
     )
     pairs.extend(a1_to_n_pairs)
+
+    # Next shift bigger than the previous one: nobody is left without a
+    # planner for the flights that depart before their shift starts.
+    pairs.extend(_fill_missing_planners(
+        pairs, by_today, {eid for eid in p2f_handlers.values() if eid},
+    ))
 
     if overrides:
         pairs = _apply_overrides(pairs, overrides)

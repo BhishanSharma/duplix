@@ -45,6 +45,7 @@ from ..schemas import (
 from .eligibility import sheet_target_for
 from .windows import (
     SHIFT_NOMINAL_MIN,
+    hours_for,
     SpacingKey,
     spacing_clear,
     spacing_key,
@@ -219,9 +220,9 @@ def apply_break_pass(
     for (shift_code, role), bucket in sorted(
         buckets.items(), key=lambda kv: (kv[0][0], kv[0][1].value),
     ):
-        nominal = SHIFT_NOMINAL_MIN.get(shift_code)
-        if nominal is None:
+        if shift_code not in SHIFT_NOMINAL_MIN:
             continue
+        nominal = hours_for(shift_code, role)   # ZCs: their own hours
         lo = nominal[0] + edge_margin
         hi = nominal[1] - edge_margin
         for s in sorted(bucket, key=lambda x: x.name):

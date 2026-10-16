@@ -129,6 +129,10 @@ class ZCCutoffConfig(_Frozen):
     and every post-pass respect it. 0 disables it."""
 
     minutes_before_shift_end: int = Field(default=60, ge=0, le=240)
+    # 2026-10-16: and no flight work in their first hour. Work on a
+    # flight starts an hour before STD, so the first STD is shift start
+    # + 120 (M ZC 06:00, A ZC 14:30, N ZC 22:30). 0 disables.
+    minutes_after_shift_start: int = Field(default=120, ge=0, le=300)
 
 
 class Config(_Frozen):

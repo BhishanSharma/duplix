@@ -12,6 +12,10 @@ run one way only.
 File layout (24-hour clock, N's end is on the next day)::
 
     {"M": {"start": "04:00", "end": "12:30"}, ..., "N": {...}}
+
+Zone Controllers can work different hours from the staff on the same
+shift (2026-10-16). Theirs live in ``configs/zc_shift_times.json``, same
+layout; absent = ZCs follow the staff hours.
 """
 
 from __future__ import annotations
@@ -42,6 +46,7 @@ MAX_LENGTH_MIN = 12 * 60
 MIN_END_GAP_MIN = 30
 
 _PATH = Path(__file__).resolve().parents[2] / "configs" / "shift_times.json"
+_ZC_PATH = _PATH.with_name("zc_shift_times.json")
 _lock = threading.RLock()
 
 _CLOCK_RE = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
@@ -79,27 +84,7 @@ def to_hours(raw: object) -> Hours:
     if missing:
         raise ValueError(f"missing shift(s): {', '.join(missing)}")
 
-    hours: Hours = {}
-    for shift in SHIFTS:
-        entry = raw[shift]
-        if not isinstance(entry, dict):
-            raise ValueError(f"{shift}: expected {{start, end}}")
-        start = parse_clock(entry.get("start"), f"{shift} start")
-        end = parse_clock(entry.get("end"), f"{shift} end")
-        if end <= start:
-            if shift != OVERNIGHT_SHIFT:
-                raise ValueError(
-                    f"{shift}: end must be after start — only {OVERNIGHT_SHIFT} "
-                    "runs past midnight"
-                )
-            end += 1440
-        if not MIN_LENGTH_MIN <= end - start <= MAX_LENGTH_MIN:
-            raise ValueError(
-                f"{shift}: a shift must be {MIN_LENGTH_MIN // 60}–"
-                f"{MAX_LENGTH_MIN // 60} hours long "
-                f"(got {(end - start) // 60} h {(end - start) % 60} min)"
-            )
-        hours[shift] = (start, end)
+    hours: Hours = {shift: _one_shift(shift, raw[shift]) for shift in SHIFTS}
 
     # The shifts form a ladder (M, M1, A, A1, N): each one starts and ends
     # later than the one before. Relief, pairing and the handover windows
@@ -112,6 +97,44 @@ def to_hours(raw: object) -> Hours:
                 f"{nxt} must end at least {MIN_END_GAP_MIN} minutes after {prev}"
             )
     return hours
+
+
+def _one_shift(shift: str, entry: object, label: str = "") -> tuple[int, int]:
+    """One shift's ``{start, end}`` → ops-day minutes, checked on its own."""
+    where = f"{label}{shift}"
+    if not isinstance(entry, dict):
+        raise ValueError(f"{where}: expected {{start, end}}")
+    start = parse_clock(entry.get("start"), f"{where} start")
+    end = parse_clock(entry.get("end"), f"{where} end")
+    if end <= start:
+        if shift != OVERNIGHT_SHIFT:
+            raise ValueError(
+                f"{where}: end must be after start — only {OVERNIGHT_SHIFT} "
+                "runs past midnight"
+            )
+        end += 1440
+    if not MIN_LENGTH_MIN <= end - start <= MAX_LENGTH_MIN:
+        raise ValueError(
+            f"{where}: a shift must be {MIN_LENGTH_MIN // 60}–"
+            f"{MAX_LENGTH_MIN // 60} hours long "
+            f"(got {(end - start) // 60} h {(end - start) % 60} min)"
+        )
+    return start, end
+
+
+def to_zc_hours(raw: object) -> Hours:
+    """Validate ZC hours ``{shift: {"start", "end"}}`` (every shift).
+    Each shift is checked on its own — ZC hours need not form the staff
+    ladder, they only have to be a plausible shift."""
+    if not isinstance(raw, dict):
+        raise ValueError("ZC shift times must be an object of {shift: {start, end}}")
+    unknown = sorted(set(raw) - set(SHIFTS))
+    missing = [s for s in SHIFTS if s not in raw]
+    if unknown:
+        raise ValueError(f"unknown shift(s): {', '.join(unknown)}")
+    if missing:
+        raise ValueError(f"missing shift(s): {', '.join(missing)}")
+    return {shift: _one_shift(shift, raw[shift], "ZC ") for shift in SHIFTS}
 
 
 def to_clock(hours: Hours) -> dict[str, dict[str, str]]:
@@ -154,3 +177,33 @@ def clear() -> None:
     """Forget the saved hours — the shipped ones apply again."""
     with _lock:
         _PATH.unlink(missing_ok=True)
+
+
+def load_saved_zc() -> Hours | None:
+    """The saved ZC hours, or ``None`` (ZCs follow the staff hours)."""
+    with _lock:
+        if not _ZC_PATH.exists():
+            return None
+        try:
+            return to_zc_hours(json.loads(_ZC_PATH.read_text(encoding="utf-8")))
+        except (ValueError, OSError) as exc:
+            raise ValueError(f"{_ZC_PATH.name} is not usable: {exc}") from exc
+
+
+def save_zc(raw: object) -> Hours:
+    """Validate and write the ZC hours."""
+    hours = to_zc_hours(raw)
+    with _lock:
+        _ZC_PATH.parent.mkdir(parents=True, exist_ok=True)
+        tmp = _ZC_PATH.with_suffix(".json.tmp")
+        tmp.write_text(
+            json.dumps(to_clock(hours), indent=2) + "\n", encoding="utf-8",
+        )
+        os.replace(tmp, _ZC_PATH)
+    return hours
+
+
+def clear_zc() -> None:
+    """Forget the ZC hours — ZCs follow the staff hours again."""
+    with _lock:
+        _ZC_PATH.unlink(missing_ok=True)

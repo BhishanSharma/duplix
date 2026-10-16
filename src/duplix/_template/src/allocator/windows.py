@@ -391,6 +391,66 @@ def shipped_shift_hours() -> dict[ShiftCode, tuple[int, int]]:
     return dict(_SHIPPED_HOURS)
 
 
+# ---------- Zone Controller hours (2026-10-16) ----------
+# ZCs may work different hours from the staff on the same shift. Until
+# set in Setup they follow the staff hours. Everything that depends on a
+# ZC's own shift — their flight window, the H21 first/last-hour rule, the
+# report buffers, break, early release, planning — reads these.
+
+ZC_NOMINAL_MIN: dict[ShiftCode, tuple[int, int]] = dict(SHIFT_NOMINAL_MIN)
+_zc_custom: dict[str, tuple[int, int]] = {}
+# ZC report buffers: the first and last 90 min of the ZC's shift.
+_ZC_BUFFER_MIN = 90
+
+
+def _refresh_zc() -> None:
+    for shift in SHIFT_NOMINAL_MIN:
+        start, end = _zc_custom.get(shift, SHIFT_NOMINAL_MIN[shift])
+        ZC_NOMINAL_MIN[shift] = (start, end)
+        ZC_BUFFER_START_MIN[shift] = (start, start + _ZC_BUFFER_MIN)
+        ZC_BUFFER_END_MIN[shift] = (end - _ZC_BUFFER_MIN, end)
+
+
+def apply_zc_hours(hours: dict[str, tuple[int, int]] | None) -> None:
+    """Make ``hours`` the ZC hours (``None`` / empty: follow the staff)."""
+    _zc_custom.clear()
+    _zc_custom.update(hours or {})
+    _refresh_zc()
+
+
+def zc_hours_customised() -> bool:
+    return bool(_zc_custom)
+
+
+def hours_for(shift: ShiftCode, role: object = None) -> tuple[int, int]:
+    """A person's nominal hours: the ZC hours for a ZC, else the shift's."""
+    if getattr(role, "value", role) == "ZC":
+        return ZC_NOMINAL_MIN[shift]
+    return SHIFT_NOMINAL_MIN[shift]
+
+
+def std_window_for(shift: ShiftCode, role: object = None) -> tuple[int, int]:
+    """The STD range a person may be given flights in (inner start to
+    outer end). A ZC's window moves with their own hours, by the same
+    offsets the shift's window has from the shift's hours."""
+    lo, hi = SHIFT_STD_WINDOW_INNER[shift]
+    hi = SHIFT_STD_WINDOW_OUTER_END.get(shift, hi)
+    if getattr(role, "value", role) == "ZC":
+        s_start, s_end = SHIFT_NOMINAL_MIN[shift]
+        z_start, z_end = ZC_NOMINAL_MIN[shift]
+        lo, hi = lo + (z_start - s_start), hi + (z_end - s_end)
+    return lo, hi
+
+
+def is_in_std_window_for(
+    std: time_t, flight_date: date_t, ops_day: date_t, shift: ShiftCode,
+    role: object = None,
+) -> bool:
+    """``is_in_std_window`` for a person: ZCs use their own window."""
+    lo, hi = std_window_for(shift, role)
+    return lo <= std_to_ops_day_minutes(std, flight_date, ops_day) <= hi
+
+
 def apply_shift_hours(hours: dict[str, tuple[int, int]]) -> None:
     """Make ``hours`` (``{shift: (start, end)}`` in ops-day minutes — see
     ``shift_hours.to_hours`` for validation) the live shift hours.
@@ -420,6 +480,8 @@ def apply_shift_hours(hours: dict[str, tuple[int, int]]) -> None:
     AWKWARD_ROUTING_MIN.clear()
     for minute, shifts in _SHIPPED_AWKWARD.items():
         AWKWARD_ROUTING_MIN[minute + d_end[_awkward_anchor(minute)]] = shifts
+    # ZCs without their own hours follow the staff's.
+    _refresh_zc()
 
 
 # Pick up hours saved from the Setup sidebar, so the CLI and the web
@@ -427,3 +489,4 @@ def apply_shift_hours(hours: dict[str, tuple[int, int]]) -> None:
 _saved_hours = shift_hours.load_saved()
 if _saved_hours is not None:
     apply_shift_hours(_saved_hours)
+apply_zc_hours(shift_hours.load_saved_zc())

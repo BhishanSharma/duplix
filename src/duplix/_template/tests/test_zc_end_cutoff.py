@@ -1,5 +1,5 @@
-"""H21: zone controllers get no normal flight in the last hour of their
-shift (eligibility F5b)."""
+"""H21: zone controllers get no normal flight in the first or last hour
+of their shift (eligibility F5b)."""
 
 from datetime import date, time
 from types import SimpleNamespace
@@ -72,3 +72,34 @@ def test_cutoff_can_be_disabled_and_resized():
 
 def test_shipped_config_sets_60():
     assert load_config("configs/config.yml").zc_cutoff.minutes_before_shift_end == 60
+
+
+# (shift, last blocked STD, first allowed STD) — nominal start + 120 min:
+# no flight work in the first hour, and work starts an hour before STD.
+@pytest.mark.parametrize("shift,blocked,ok", [
+    ("M", (5, 55), (6, 0)),       # starts 04:00
+    ("M1", (7, 55), (8, 0)),      # starts 06:00
+    ("A", (14, 25), (14, 30)),    # starts 12:30
+    ("A1", (16, 25), (16, 30)),   # starts 14:30
+    ("N", (22, 25), (22, 30)),    # starts 20:30
+])
+def test_zc_first_flight_two_hours_after_start(shift, blocked, ok):
+    zc = person(Role.ZC, shift)
+    assert check(flight(*blocked), zc, ctx()) == ExcludeReason.ZC_START_CUTOFF
+    assert check(flight(*ok), zc, ctx()) is None
+
+
+def test_staff_role_unaffected_at_shift_start():
+    assert check(flight(13, 0), person(Role.STAFF, "A"), ctx()) is None
+
+
+def test_start_cutoff_p2f_exempt_and_can_be_disabled():
+    zc = person(Role.ZC, "A")
+    p2f = flight(13, 5, ops_class=OpsClass.P2F)
+    assert check(p2f, zc, ctx(p2f_handler_by_shift={"A": "X"})) is None
+    assert check(flight(13, 0), zc, ctx(zc_start_cutoff_min=0)) is None
+
+
+def test_shipped_config_sets_start_120():
+    cfg = load_config("configs/config.yml").zc_cutoff
+    assert cfg.minutes_after_shift_start == 120

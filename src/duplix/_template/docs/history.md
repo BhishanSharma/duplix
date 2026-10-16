@@ -3,6 +3,49 @@
 Notable changes and why they were made, newest first. Commit messages hold
 the full detail.
 
+## 2026-10-16 — M1 helps plan A's first flights
+
+* When M can't plan every A flight that departs before the A person
+  arrives, M1 (mid-shift at that time) plans it: extra A people get an M1
+  planner before an M person plans for two, and a third early flight
+  (e.g. 13:40) gets an M1 planner instead of being moved. At most 2 A
+  flights per M1 person; listed as W217. 26 Sep: the five 13:40
+  "no planner" warnings are gone (W230 18 → 11).
+
+## 2026-10-16 — Zone Controller shift hours
+
+* Setup → Shift timings has a second table for Zone Controllers. Until
+  saved, ZCs follow the staff hours; once saved, a ZC's first / last
+  flight (start + 2 h / end − 1 h), flight window, report buffers,
+  break, early release and planning use the ZC hours. Saved to
+  `configs/zc_shift_times.json` (git-ignored); "Same as staff" resets.
+
+## 2026-10-16 — ZCs free for the first hour of their shift
+
+* Zone Controllers do no flight work in their first hour. Work on a
+  flight starts an hour before STD, so their first STD is shift start +
+  2 h (`zc_cutoff.minutes_after_shift_start: 120`): M 06:00, M1 08:00,
+  A 14:30, A1 16:30, N 22:30. The last-hour rule is unchanged (STD up to
+  end − 60). P2F flights exempt.
+
+## 2026-10-16 — Self-plan rule
+
+* A flight that must be planned before its holder's shift starts (75 min
+  ahead) stays with them only if their handover partner plans it. Extra
+  ones are re-placed by repair; normal day: 15 moved, 12 re-placed
+  cleanly, 3 force-placed and flagged "no planner". Spacing exceptions
+  unchanged (5).
+* Planner slots no longer get used up by a P2F flight.
+
+## 2026-10-16 — Planner for everyone when the next shift is bigger
+
+* Reported: M had fewer people than A, so some A people had nobody to
+  plan the first flights that depart before their shift starts (3 of 35
+  on a re-run of 26 Sep with 4 M off). Now the extra people share a
+  planner from the previous shift (at most two each, P2F handlers last)
+  at M→M1, M→A, M1→A1 and A→N; listed as W216. The end-of-shift case
+  (earlier shift bigger) was already handled by relievers / early release.
+
 ## 2026-10-11 — Handover fixes
 
 * Roster years are worked out (banner, weekday, the file's date, today);
